@@ -9,6 +9,24 @@ Calculadora de precios para **Mercado Libre México** y **Amazon México** con c
 3. Conecta el repo
 4. ¡Listo!
 
+## 🔐 Configuración de Secrets (Obligatorio para Shopify Sync)
+
+Para conectar con Shopify morekashop1, debes configurar el token en los **Secrets** de Streamlit Cloud:
+
+1. Ve a tu app en [share.streamlit.io](https://share.streamlit.io)
+2. Click en **Settings** (⚙️)
+3. Ve a **Secrets**
+4. Agrega:
+
+```toml
+[shopify]
+MOREKA_ACCESS_TOKEN = "tu_token_aqui"
+```
+
+5. Click **Save**
+
+**Nota:** El token nunca se guarda en el código. Se lee desde `st.secrets` en tiempo de ejecución.
+
 ## 📊 Funciones
 
 ### 🧮 Calculadora Manual (Tab 1)
