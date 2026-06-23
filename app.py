@@ -2,7 +2,8 @@
 """
 Calculadora de Precios para Marketplaces — México 2026
 Mercado Libre y Amazon México con comisiones reales 2026
-Lógica: Calcula precio base para que precio con descuento (40-50%) mantenga margen deseado
+Lógica: Precio tope calculado para 5% de ganancia con 60% descuento
+Desde ese precio base fijo, se calculan las ganancias con 60%, 50%, 40%, 30% OFF
 Sincronización con Shopify morekashop1 para obtener costos
 """
 
@@ -70,6 +71,12 @@ st.markdown("""
         border-radius: 12px;
         color: white;
     }
+    .metric-card-dark {
+        background: linear-gradient(135deg, #232526 0%, #414345 100%);
+        padding: 1.5rem;
+        border-radius: 12px;
+        color: white;
+    }
     .warning-box {
         background: #fff3cd;
         border: 1px solid #ffc107;
@@ -109,6 +116,17 @@ st.markdown("""
     .discount-green { background: #d4edda; color: #155724; }
     .discount-yellow { background: #fff3cd; color: #856404; }
     .discount-red { background: #f8d7da; color: #721c24; }
+    .scenario-card {
+        background: #ffffff;
+        border: 2px solid #e0e0e0;
+        border-radius: 12px;
+        padding: 1.5rem;
+        margin-bottom: 1rem;
+    }
+    .scenario-card.best {
+        border-color: #f5af19;
+        background: #fffbf0;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -222,92 +240,45 @@ def calculate_ml_fees(price, category_name, listing_type="classic", has_rfc=True
         "net_received": price - total_fees,
     }
 
-def calculate_ml_price_for_discount(cost, target_margin_after_discount, discount_pct, category_name, listing_type="classic", has_rfc=True, shipping_cost=0):
-    """Calcula el precio BASE necesario para que el precio con descuento mantenga el margen deseado.
+def calculate_ml_base_price(cost, target_margin, discount_pct, category_name, listing_type="classic", has_rfc=True, shipping_cost=0):
+    """Calcula el precio BASE necesario para que el precio con descuento mantenga el margen deseado."""
+    # Iteración: las comisiones dependen del precio con descuento
+    price_discounted = cost * 2  # Estimación inicial
     
-    Fórmula:
-    1. Precio con descuento = Costo / (1 - margen_deseado - tarifas)
-    2. Precio base = Precio con descuento / (1 - descuento)
-    
-    Las comisiones se calculan sobre el precio CON descuento (lo que realmente paga el cliente).
-    """
-    cat = ML_CATEGORIES.get(category_name, ML_CATEGORIES["Custom"])
-    commission_rate = cat[listing_type]
-    
-    # Tarifa total aproximada sobre precio con descuento
-    if has_rfc:
-        tax_rate = (0.08 + 0.025) / 1.16
-    else:
-        tax_rate = (0.16 / 1.16) + 0.20
-    
-    total_fee_rate = commission_rate + tax_rate
-    
-    # Iteración para resolver: las comisiones dependen del precio con descuento
-    # que depende del precio base, que depende del precio con descuento...
-    price_discounted = cost / (1 - target_margin_after_discount - total_fee_rate)
-    
-    # Iterar para ajustar fixed fee y comisiones exactas
-    for _ in range(10):
-        fixed_fee = get_ml_fixed_fee(price_discounted, listing_type)
+    for _ in range(20):
         fees = calculate_ml_fees(price_discounted, category_name, listing_type, has_rfc)
         total_fees = fees["total_fees"] + shipping_cost
-        
-        # Margen deseado sobre el precio con descuento: (price_discounted - cost - fees) / price_discounted = target_margin
-        # price_discounted - cost - fees = target_margin * price_discounted
-        # price_discounted * (1 - target_margin) = cost + fees
-        # Pero fees dependen de price_discounted...
-        # Solución iterativa
-        price_discounted = (cost + total_fees) / (1 - target_margin_after_discount)
+        # price_discounted - cost - total_fees = target_margin * price_discounted
+        # price_discounted * (1 - target_margin) = cost + total_fees
+        price_discounted = (cost + total_fees) / (1 - target_margin)
     
-    # Ahora calcular precio base: price_discounted = price_base * (1 - discount)
+    # Precio base = Precio con descuento / (1 - discount)
     price_base = price_discounted / (1 - discount_pct)
-    
-    # Verificar con el precio base final
-    price_discounted = price_base * (1 - discount_pct)
-    fees = calculate_ml_fees(price_discounted, category_name, listing_type, has_rfc)
-    total_fees = fees["total_fees"] + shipping_cost
-    profit = price_discounted - cost - total_fees
-    actual_margin = profit / price_discounted if price_discounted > 0 else 0
-    
-    # Ajustar si el margen no coincide exactamente
-    if abs(actual_margin - target_margin_after_discount) > 0.001:
-        # Reajuste final
-        price_discounted = (cost + total_fees) / (1 - target_margin_after_discount)
-        price_base = price_discounted / (1 - discount_pct)
     
     return round(price_base, 2), round(price_discounted, 2)
 
-def calculate_ml_scenarios(cost, target_margin, discount_levels, category_name, listing_type="classic", has_rfc=True, shipping_cost=0):
-    """Calcula precio base para que cada nivel de descuento mantenga el margen deseado."""
-    results = []
+def calculate_ml_from_fixed_base(cost, base_price, discount_pct, category_name, listing_type="classic", has_rfc=True, shipping_cost=0):
+    """Desde un precio base FIJO, calcula ganancia con un % de descuento dado."""
+    price_discounted = base_price * (1 - discount_pct)
     
-    for discount_pct in discount_levels:
-        base_price, disc_price = calculate_ml_price_for_discount(
-            cost, target_margin, discount_pct, category_name, listing_type, has_rfc, shipping_cost
-        )
-        
-        fees = calculate_ml_fees(disc_price, category_name, listing_type, has_rfc)
-        total_fees = fees["total_fees"] + shipping_cost
-        profit = disc_price - cost - total_fees
-        margin_actual = (profit / disc_price) * 100 if disc_price > 0 else 0
-        roi = (profit / cost) * 100 if cost > 0 else 0
-        
-        # Calcular precio base sin descuento (solo margen deseado, sin descuento)
-        base_price_no_discount = disc_price / (1 - discount_pct)
-        
-        results.append({
-            "discount_pct": discount_pct * 100,
-            "base_price": base_price,
-            "discounted_price": disc_price,
-            "discount_amount": round(base_price - disc_price, 2),
-            "fees": fees,
-            "profit": round(profit, 2),
-            "margin_actual": round(margin_actual, 2),
-            "roi": round(roi, 2),
-            "total_cost": cost + shipping_cost,
-        })
+    fees = calculate_ml_fees(price_discounted, category_name, listing_type, has_rfc)
+    total_fees = fees["total_fees"] + shipping_cost
     
-    return results
+    profit = price_discounted - cost - total_fees
+    margin = (profit / price_discounted) * 100 if price_discounted > 0 else 0
+    roi = (profit / cost) * 100 if cost > 0 else 0
+    
+    return {
+        "discount_pct": discount_pct * 100,
+        "base_price": base_price,
+        "discounted_price": round(price_discounted, 2),
+        "discount_amount": round(base_price - price_discounted, 2),
+        "fees": fees,
+        "profit": round(profit, 2),
+        "margin": round(margin, 2),
+        "roi": round(roi, 2),
+        "total_cost": cost + shipping_cost,
+    }
 
 # ============================================================
 # FUNCIONES DE CÁLCULO — AMAZON MÉXICO
@@ -338,66 +309,41 @@ def calculate_amazon_fees(price, category_name, fba_fee=0, shipping_cost=0, plan
         "net_received": price - total_fees,
     }
 
-def calculate_amazon_price_for_discount(cost, target_margin_after_discount, discount_pct, category_name, fba_fee=0, shipping_cost=0, plan_professional=True):
+def calculate_amazon_base_price(cost, target_margin, discount_pct, category_name, fba_fee=0, shipping_cost=0, plan_professional=True):
     """Calcula el precio BASE necesario para que el precio con descuento mantenga el margen deseado."""
-    referral_rate = AMAZON_CATEGORIES.get(category_name, 0.15)
+    price_discounted = cost * 2  # Estimación inicial
     
-    plan_fee = 20.0 if plan_professional else 0
-    fba = fba_fee if fba_fee else 0
-    ship = shipping_cost if not fba_fee else 0
-    fixed_fees = plan_fee + fba + ship
-    
-    # Iteración para resolver
-    price_discounted = cost / (1 - target_margin_after_discount - referral_rate)
-    
-    for _ in range(10):
+    for _ in range(20):
         fees = calculate_amazon_fees(price_discounted, category_name, fba_fee, shipping_cost, plan_professional)
         total_fees = fees["total_fees"]
-        price_discounted = (cost + total_fees) / (1 - target_margin_after_discount)
+        price_discounted = (cost + total_fees) / (1 - target_margin)
     
     price_base = price_discounted / (1 - discount_pct)
     
-    # Verificación
-    price_discounted = price_base * (1 - discount_pct)
-    fees = calculate_amazon_fees(price_discounted, category_name, fba_fee, shipping_cost, plan_professional)
-    total_fees = fees["total_fees"]
-    profit = price_discounted - cost - total_fees
-    actual_margin = profit / price_discounted if price_discounted > 0 else 0
-    
-    if abs(actual_margin - target_margin_after_discount) > 0.001:
-        price_discounted = (cost + total_fees) / (1 - target_margin_after_discount)
-        price_base = price_discounted / (1 - discount_pct)
-    
     return round(price_base, 2), round(price_discounted, 2)
 
-def calculate_amazon_scenarios(cost, target_margin, discount_levels, category_name, fba_fee=0, shipping_cost=0, plan_professional=True):
-    """Calcula precio base para que cada nivel de descuento mantenga el margen deseado."""
-    results = []
+def calculate_amazon_from_fixed_base(cost, base_price, discount_pct, category_name, fba_fee=0, shipping_cost=0, plan_professional=True):
+    """Desde un precio base FIJO, calcula ganancia con un % de descuento dado."""
+    price_discounted = base_price * (1 - discount_pct)
     
-    for discount_pct in discount_levels:
-        base_price, disc_price = calculate_amazon_price_for_discount(
-            cost, target_margin, discount_pct, category_name, fba_fee, shipping_cost, plan_professional
-        )
-        
-        fees = calculate_amazon_fees(disc_price, category_name, fba_fee, shipping_cost, plan_professional)
-        total_fees = fees["total_fees"]
-        profit = disc_price - cost - total_fees
-        margin_actual = (profit / disc_price) * 100 if disc_price > 0 else 0
-        roi = (profit / cost) * 100 if cost > 0 else 0
-        
-        results.append({
-            "discount_pct": discount_pct * 100,
-            "base_price": base_price,
-            "discounted_price": disc_price,
-            "discount_amount": round(base_price - disc_price, 2),
-            "fees": fees,
-            "profit": round(profit, 2),
-            "margin_actual": round(margin_actual, 2),
-            "roi": round(roi, 2),
-            "total_cost": cost + (shipping_cost if not fba_fee else 0),
-        })
+    fees = calculate_amazon_fees(price_discounted, category_name, fba_fee, shipping_cost, plan_professional)
+    total_fees = fees["total_fees"]
     
-    return results
+    profit = price_discounted - cost - total_fees
+    margin = (profit / price_discounted) * 100 if price_discounted > 0 else 0
+    roi = (profit / cost) * 100 if cost > 0 else 0
+    
+    return {
+        "discount_pct": discount_pct * 100,
+        "base_price": base_price,
+        "discounted_price": round(price_discounted, 2),
+        "discount_amount": round(base_price - price_discounted, 2),
+        "fees": fees,
+        "profit": round(profit, 2),
+        "margin": round(margin, 2),
+        "roi": round(roi, 2),
+        "total_cost": cost + (shipping_cost if not fba_fee else 0),
+    }
 
 # ============================================================
 # SHOPIFY SYNC — MOREKASHOP1
@@ -556,28 +502,18 @@ with st.sidebar:
     )
     
     st.markdown("---")
-    st.markdown("#### 🎯 Descuentos a Calcular")
-    discount_levels = st.multiselect(
-        "Niveles de descuento",
-        [0.40, 0.45, 0.50, 0.55, 0.60],
-        default=[0.40, 0.45, 0.50],
-        format_func=lambda x: f"{int(x*100)}%"
-    )
-    
-    st.markdown("---")
     st.markdown("<div style='font-size: 0.8rem; color: #999;'>Comisiones actualizadas: Junio 2026<br>Fuente: SAT / ML / Amazon</div>", unsafe_allow_html=True)
 
 # ============================================================
 # HEADER PRINCIPAL
 # ============================================================
 st.markdown('<div class="main-header">💰 Marketplace Pricing Calculator México 2026</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">Calcula precios base para aplicar descuentos del 40-50% manteniendo tu margen de ganancia</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">Precio base tope con 5% ganancia al 60% OFF — Simula ganancias con 60%, 50%, 40%, 30% descuento</div>', unsafe_allow_html=True)
 
 st.markdown("""
 <div class="success-box">
-    <b>💡 Cómo funciona:</b> Ingresa tu <b>costo</b> y el <b>margen que quieres GANAR después del descuento</b>. 
-    La app calcula el <b>precio base</b> que debes publicar para que, al aplicar el descuento, 
-    aún mantengas tu margen deseado. Las comisiones se calculan sobre el precio CON descuento.
+    <b>💡 Cómo funciona:</b> La app calcula el <b>precio base tope</b> para que con <b>60% de descuento</b> obtengas <b>5% de ganancia</b>. 
+    Ese precio base es fijo. Luego simula cuánto ganarías si aplicas <b>60%, 50%, 40% o 30%</b> de descuento sobre ese mismo precio base.
 </div>
 """, unsafe_allow_html=True)
 
@@ -607,13 +543,8 @@ with tab1:
             min_value=0.0,
             step=10.0
         )
-        target_margin = st.slider(
-            "🎯 Margen de ganancia DESPUÉS del descuento (%)",
-            min_value=0,
-            max_value=80,
-            value=30,
-            help="Este es el margen que quieres ganar sobre el precio que realmente recibes (después del descuento)"
-        ) / 100
+        
+        st.markdown("<div class='warning-box'>📌 El margen objetivo está fijado en <b>5% de ganancia</b> con <b>60% OFF</b>. Este es el precio tope.</div>", unsafe_allow_html=True)
     
     with col2:
         st.markdown("#### 📋 Categorías")
@@ -631,229 +562,259 @@ with tab1:
     st.markdown("---")
     
     # ========== MERCADO LIBRE ==========
-    st.markdown("### 🟡 Mercado Libre")
+    st.markdown("### 🟡 Mercado Libre — Precio Tope + Simulación de Descuentos")
     
-    if discount_levels:
-        ml_scenarios = calculate_ml_scenarios(
-            cost, target_margin, discount_levels, ml_category, ml_listing_type, has_rfc, ml_shipping_cost
+    # Calcular precio base tope para 5% ganancia con 60% OFF
+    ml_base_price, ml_discounted_60 = calculate_ml_base_price(
+        cost, 0.05, 0.60, ml_category, ml_listing_type, has_rfc, ml_shipping_cost
+    )
+    
+    # Simular ganancias desde ese precio base fijo con diferentes descuentos
+    ml_discount_levels = [0.60, 0.50, 0.40, 0.30]
+    ml_scenarios = []
+    
+    for d in ml_discount_levels:
+        scenario = calculate_ml_from_fixed_base(
+            cost, ml_base_price, d, ml_category, ml_listing_type, has_rfc, ml_shipping_cost
         )
-        
-        # Show all scenarios in a table
-        df_ml = pd.DataFrame([
-            {
-                "Descuento": f"{s['discount_pct']:.0f}%",
-                "Precio Base (Publicar)": f"${s['base_price']:,.2f}",
-                "Precio con Descuento": f"${s['discounted_price']:,.2f}",
-                "Monto Descuento": f"${s['discount_amount']:,.2f}",
-                "Comisiones ML": f"${s['fees']['total_fees']:,.2f}",
-                "Ganancia Neta": f"${s['profit']:,.2f}",
-                "Margen Real": f"{s['margin_actual']:.1f}%",
-                "ROI": f"{s['roi']:.1f}%",
-            }
-            for s in ml_scenarios
-        ])
-        
-        st.dataframe(df_ml, use_container_width=True, hide_index=True)
-        
-        # Highlight the recommended base price (usually the highest discount scenario)
-        if ml_scenarios:
-            max_discount_scenario = ml_scenarios[-1]  # Highest discount
+        ml_scenarios.append(scenario)
+    
+    # Mostrar precio base tope
+    st.markdown("#### ⭐ Precio Base Tope (para 5% ganancia con 60% OFF)")
+    
+    m1, m2, m3 = st.columns(3)
+    with m1:
+        st.markdown(f'''
+            <div class="metric-card-gold">
+                <div style="font-size: 0.9rem; opacity: 0.9;">Precio Base Tope ML</div>
+                <div style="font-size: 2.2rem; font-weight: 700;">${ml_base_price:,.2f} MXN</div>
+                <div style="font-size: 0.85rem; opacity: 0.9;">Con 60% OFF → 5% ganancia</div>
+            </div>
+        ''', unsafe_allow_html=True)
+    with m2:
+        st.markdown(f'''
+            <div class="metric-card-blue">
+                <div style="font-size: 0.9rem; opacity: 0.9;">Precio con 60% OFF</div>
+                <div style="font-size: 2.2rem; font-weight: 700;">${ml_discounted_60:,.2f} MXN</div>
+                <div style="font-size: 0.85rem; opacity: 0.9;">Lo que paga el cliente</div>
+            </div>
+        ''', unsafe_allow_html=True)
+    with m3:
+        profit_60 = ml_scenarios[0]["profit"]
+        st.markdown(f'''
+            <div class="metric-card-green">
+                <div style="font-size: 0.9rem; opacity: 0.9;">Ganancia con 60% OFF</div>
+                <div style="font-size: 2.2rem; font-weight: 700;">${profit_60:,.2f}</div>
+                <div style="font-size: 0.85rem; opacity: 0.9;">Margen: 5.0% (fijo)</div>
+            </div>
+        ''', unsafe_allow_html=True)
+    
+    # Tabla comparativa de escenarios
+    st.markdown("#### 🏷️ Simulación de Ganancias desde Precio Base Tope")
+    
+    df_ml = pd.DataFrame([
+        {
+            "Descuento": f"{s['discount_pct']:.0f}%",
+            "Precio Base (Fijo)": f"${s['base_price']:,.2f}",
+            "Precio con Descuento": f"${s['discounted_price']:,.2f}",
+            "Monto Descuento": f"${s['discount_amount']:,.2f}",
+            "Comisiones ML": f"${s['fees']['total_fees']:,.2f}",
+            "Ganancia Neta": f"${s['profit']:,.2f}",
+            "Margen Real": f"{s['margin']:.1f}%",
+            "ROI": f"{s['roi']:.1f}%",
+        }
+        for s in ml_scenarios
+    ])
+    
+    st.dataframe(df_ml, use_container_width=True, hide_index=True)
+    
+    # Cards de cada escenario
+    st.markdown("#### 📊 Detalle por Nivel de Descuento")
+    
+    cols = st.columns(4)
+    for i, s in enumerate(ml_scenarios):
+        with cols[i]:
+            # Destacar el de 60% como el tope
+            is_best = s['discount_pct'] == 60
+            card_class = "scenario-card best" if is_best else "scenario-card"
             
-            st.markdown("#### ⭐ Precio Recomendado para Publicar")
+            st.markdown(f'<div class="{card_class}">', unsafe_allow_html=True)
             
-            m1, m2, m3 = st.columns(3)
-            with m1:
-                st.markdown(f'''
-                    <div class="metric-card-gold">
-                        <div style="font-size: 0.9rem; opacity: 0.9;">Precio Base ML</div>
-                        <div style="font-size: 2.2rem; font-weight: 700;">${max_discount_scenario['base_price']:,.2f} MXN</div>
-                        <div style="font-size: 0.85rem; opacity: 0.9;">Para aplicar hasta {max_discount_scenario['discount_pct']:.0f}% descuento</div>
-                    </div>
-                ''', unsafe_allow_html=True)
-            with m2:
-                st.markdown(f'''
-                    <div class="metric-card-green">
-                        <div style="font-size: 0.9rem; opacity: 0.9;">Ganancia con {max_discount_scenario['discount_pct']:.0f}% off</div>
-                        <div style="font-size: 2.2rem; font-weight: 700;">${max_discount_scenario['profit']:,.2f}</div>
-                        <div style="font-size: 0.85rem; opacity: 0.9;">Margen: {max_discount_scenario['margin_actual']:.1f}%</div>
-                    </div>
-                ''', unsafe_allow_html=True)
-            with m3:
-                st.markdown(f'''
-                    <div class="metric-card-blue">
-                        <div style="font-size: 0.9rem; opacity: 0.9;">Precio con Descuento</div>
-                        <div style="font-size: 2.2rem; font-weight: 700;">${max_discount_scenario['discounted_price']:,.2f} MXN</div>
-                        <div style="font-size: 0.85rem; opacity: 0.9;">Lo que paga el cliente</div>
-                    </div>
-                ''', unsafe_allow_html=True)
+            if is_best:
+                st.markdown("🎯 **PRECIO TOPE**")
             
-            # Show all discount scenarios side by side
-            st.markdown("#### 🏷️ Comparación de Escenarios de Descuento")
+            st.markdown(f"### {s['discount_pct']:.0f}% OFF")
+            st.markdown(f"**Precio final:** ${s['discounted_price']:,.2f}")
+            st.markdown(f"**Ganancia:** ${s['profit']:,.2f}")
+            st.markdown(f"**Margen:** {s['margin']:.1f}%")
             
-            cols = st.columns(len(ml_scenarios))
-            for i, s in enumerate(ml_scenarios):
-                with cols[i]:
-                    st.markdown(f"**{s['discount_pct']:.0f}% OFF**")
-                    st.markdown(f"- **Base:** ${s['base_price']:,.2f}")
-                    st.markdown(f"- **Final:** ${s['discounted_price']:,.2f}")
-                    st.markdown(f"- **Ganancia:** ${s['profit']:,.2f}")
-                    st.markdown(f"- **Margen:** {s['margin_actual']:.1f}%")
-                    
-                    if s['profit'] < 0:
-                        st.markdown("<span class='profit-negative'>❌ PÉRDIDA</span>", unsafe_allow_html=True)
-                    elif s['margin_actual'] < 10:
-                        st.markdown("<span class='profit-negative'>⚠️ Margen bajo</span>", unsafe_allow_html=True)
-                    else:
-                        st.markdown("<span class='profit-positive'>✅ Rentable</span>", unsafe_allow_html=True)
+            if s['profit'] < 0:
+                st.markdown("<span class='profit-negative'>❌ PÉRDIDA</span>", unsafe_allow_html=True)
+            elif s['margin'] < 5:
+                st.markdown("<span class='profit-negative'>⚠️ Margen bajo</span>", unsafe_allow_html=True)
+            elif s['margin'] >= 20:
+                st.markdown("<span class='profit-positive'>✅ Excelente margen</span>", unsafe_allow_html=True)
+            else:
+                st.markdown("<span class='profit-positive'>✅ Rentable</span>", unsafe_allow_html=True)
             
-            # Fee breakdown for the highest discount scenario
-            with st.expander("📋 Desglose de comisiones ML (al precio con descuento)"):
-                s = max_discount_scenario
-                fee_col1, fee_col2 = st.columns(2)
-                with fee_col1:
-                    st.markdown(f"""
-                    <div class="fee-breakdown">
-                        <b>Comisión ML ({s['fees']['commission_rate']*100:.1f}%):</b> ${s['fees']['commission']:,.2f}<br>
-                        <b>Costo fijo:</b> ${s['fees']['fixed_fee']:,.2f}<br>
-                        <b>Base gravable:</b> ${s['fees']['base_gravable']:,.2f}<br>
-                    </div>
-                    """, unsafe_allow_html=True)
-                with fee_col2:
-                    iva_label = "8% (con RFC)" if has_rfc else "16% (sin RFC)"
-                    isr_label = "2.5% (con RFC)" if has_rfc else "20% (sin RFC)"
-                    st.markdown(f"""
-                    <div class="fee-breakdown">
-                        <b>IVA retenido ({iva_label}):</b> ${s['fees']['iva_ret']:,.2f}<br>
-                        <b>ISR retenido ({isr_label}):</b> ${s['fees']['isr_ret']:,.2f}<br>
-                        <b>Envío:</b> ${ml_shipping_cost:,.2f}<br>
-                        <b><b>Total comisiones:</b></b> ${s['fees']['total_fees']:,.2f} + Envío ${ml_shipping_cost:,.2f}
-                    </div>
-                    """, unsafe_allow_html=True)
-    else:
-        st.warning("Selecciona al menos un nivel de descuento en la sidebar")
+            st.markdown("</div>", unsafe_allow_html=True)
+    
+    # Fee breakdown
+    with st.expander("📋 Desglose de comisiones ML (al precio con descuento)"):
+        s = ml_scenarios[0]  # 60% OFF
+        fee_col1, fee_col2 = st.columns(2)
+        with fee_col1:
+            st.markdown(f"""
+            <div class="fee-breakdown">
+                <b>Comisión ML ({s['fees']['commission_rate']*100:.1f}%):</b> ${s['fees']['commission']:,.2f}<br>
+                <b>Costo fijo:</b> ${s['fees']['fixed_fee']:,.2f}<br>
+                <b>Base gravable:</b> ${s['fees']['base_gravable']:,.2f}<br>
+            </div>
+            """, unsafe_allow_html=True)
+        with fee_col2:
+            iva_label = "8% (con RFC)" if has_rfc else "16% (sin RFC)"
+            isr_label = "2.5% (con RFC)" if has_rfc else "20% (sin RFC)"
+            st.markdown(f"""
+            <div class="fee-breakdown">
+                <b>IVA retenido ({iva_label}):</b> ${s['fees']['iva_ret']:,.2f}<br>
+                <b>ISR retenido ({isr_label}):</b> ${s['fees']['isr_ret']:,.2f}<br>
+                <b>Envío:</b> ${ml_shipping_cost:,.2f}<br>
+                <b>Total comisiones:</b> ${s['fees']['total_fees']:,.2f} + Envío ${ml_shipping_cost:,.2f}
+            </div>
+            """, unsafe_allow_html=True)
     
     st.markdown("---")
     
     # ========== AMAZON ==========
-    st.markdown("### 🟠 Amazon México")
+    st.markdown("### 🟠 Amazon México — Precio Tope + Simulación de Descuentos")
     
     az_fba = fba_cost_per_unit if use_fba else 0
     az_ship = 0 if use_fba else amazon_shipping
     
-    if discount_levels:
-        az_scenarios = calculate_amazon_scenarios(
-            cost, target_margin, discount_levels, az_category, az_fba, az_ship, plan_professional
+    # Calcular precio base tope para 5% ganancia con 60% OFF
+    az_base_price, az_discounted_60 = calculate_amazon_base_price(
+        cost, 0.05, 0.60, az_category, az_fba, az_ship, plan_professional
+    )
+    
+    # Simular ganancias desde ese precio base fijo
+    az_scenarios = []
+    for d in [0.60, 0.50, 0.40, 0.30]:
+        scenario = calculate_amazon_from_fixed_base(
+            cost, az_base_price, d, az_category, az_fba, az_ship, plan_professional
         )
-        
-        df_az = pd.DataFrame([
-            {
-                "Descuento": f"{s['discount_pct']:.0f}%",
-                "Precio Base (Publicar)": f"${s['base_price']:,.2f}",
-                "Precio con Descuento": f"${s['discounted_price']:,.2f}",
-                "Monto Descuento": f"${s['discount_amount']:,.2f}",
-                "Comisiones Amazon": f"${s['fees']['total_fees']:,.2f}",
-                "Ganancia Neta": f"${s['profit']:,.2f}",
-                "Margen Real": f"{s['margin_actual']:.1f}%",
-                "ROI": f"{s['roi']:.1f}%",
-            }
-            for s in az_scenarios
-        ])
-        
-        st.dataframe(df_az, use_container_width=True, hide_index=True)
-        
-        if az_scenarios:
-            max_az_scenario = az_scenarios[-1]
+        az_scenarios.append(scenario)
+    
+    # Mostrar precio base tope
+    st.markdown("#### ⭐ Precio Base Tope (para 5% ganancia con 60% OFF)")
+    
+    a1, a2, a3 = st.columns(3)
+    with a1:
+        st.markdown(f'''
+            <div class="metric-card-gold">
+                <div style="font-size: 0.9rem; opacity: 0.9;">Precio Base Tope Amazon</div>
+                <div style="font-size: 2.2rem; font-weight: 700;">${az_base_price:,.2f} MXN</div>
+                <div style="font-size: 0.85rem; opacity: 0.9;">Con 60% OFF → 5% ganancia</div>
+            </div>
+        ''', unsafe_allow_html=True)
+    with a2:
+        st.markdown(f'''
+            <div class="metric-card-blue">
+                <div style="font-size: 0.9rem; opacity: 0.9;">Precio con 60% OFF</div>
+                <div style="font-size: 2.2rem; font-weight: 700;">${az_discounted_60:,.2f} MXN</div>
+                <div style="font-size: 0.85rem; opacity: 0.9;">Lo que paga el cliente</div>
+            </div>
+        ''', unsafe_allow_html=True)
+    with a3:
+        az_profit_60 = az_scenarios[0]["profit"]
+        st.markdown(f'''
+            <div class="metric-card-green">
+                <div style="font-size: 0.9rem; opacity: 0.9;">Ganancia con 60% OFF</div>
+                <div style="font-size: 2.2rem; font-weight: 700;">${az_profit_60:,.2f}</div>
+                <div style="font-size: 0.85rem; opacity: 0.9;">Margen: 5.0% (fijo)</div>
+            </div>
+        ''', unsafe_allow_html=True)
+    
+    # Tabla comparativa
+    df_az = pd.DataFrame([
+        {
+            "Descuento": f"{s['discount_pct']:.0f}%",
+            "Precio Base (Fijo)": f"${s['base_price']:,.2f}",
+            "Precio con Descuento": f"${s['discounted_price']:,.2f}",
+            "Monto Descuento": f"${s['discount_amount']:,.2f}",
+            "Comisiones Amazon": f"${s['fees']['total_fees']:,.2f}",
+            "Ganancia Neta": f"${s['profit']:,.2f}",
+            "Margen Real": f"{s['margin']:.1f}%",
+            "ROI": f"{s['roi']:.1f}%",
+        }
+        for s in az_scenarios
+    ])
+    
+    st.dataframe(df_az, use_container_width=True, hide_index=True)
+    
+    # Cards de cada escenario
+    st.markdown("#### 📊 Detalle por Nivel de Descuento")
+    
+    cols = st.columns(4)
+    for i, s in enumerate(az_scenarios):
+        with cols[i]:
+            is_best = s['discount_pct'] == 60
+            card_class = "scenario-card best" if is_best else "scenario-card"
             
-            st.markdown("#### ⭐ Precio Recomendado para Publicar")
+            st.markdown(f'<div class="{card_class}">', unsafe_allow_html=True)
             
-            a1, a2, a3 = st.columns(3)
-            with a1:
-                st.markdown(f'''
-                    <div class="metric-card-gold">
-                        <div style="font-size: 0.9rem; opacity: 0.9;">Precio Base Amazon</div>
-                        <div style="font-size: 2.2rem; font-weight: 700;">${max_az_scenario['base_price']:,.2f} MXN</div>
-                        <div style="font-size: 0.85rem; opacity: 0.9;">Para aplicar hasta {max_az_scenario['discount_pct']:.0f}% descuento</div>
-                    </div>
-                ''', unsafe_allow_html=True)
-            with a2:
-                st.markdown(f'''
-                    <div class="metric-card-green">
-                        <div style="font-size: 0.9rem; opacity: 0.9;">Ganancia con {max_az_scenario['discount_pct']:.0f}% off</div>
-                        <div style="font-size: 2.2rem; font-weight: 700;">${max_az_scenario['profit']:,.2f}</div>
-                        <div style="font-size: 0.85rem; opacity: 0.9;">Margen: {max_az_scenario['margin_actual']:.1f}%</div>
-                    </div>
-                ''', unsafe_allow_html=True)
-            with a3:
-                st.markdown(f'''
-                    <div class="metric-card-blue">
-                        <div style="font-size: 0.9rem; opacity: 0.9;">Precio con Descuento</div>
-                        <div style="font-size: 2.2rem; font-weight: 700;">${max_az_scenario['discounted_price']:,.2f} MXN</div>
-                        <div style="font-size: 0.85rem; opacity: 0.9;">Lo que paga el cliente</div>
-                    </div>
-                ''', unsafe_allow_html=True)
+            if is_best:
+                st.markdown("🎯 **PRECIO TOPE**")
             
-            st.markdown("#### 🏷️ Comparación de Escenarios de Descuento")
+            st.markdown(f"### {s['discount_pct']:.0f}% OFF")
+            st.markdown(f"**Precio final:** ${s['discounted_price']:,.2f}")
+            st.markdown(f"**Ganancia:** ${s['profit']:,.2f}")
+            st.markdown(f"**Margen:** {s['margin']:.1f}%")
             
-            cols = st.columns(len(az_scenarios))
-            for i, s in enumerate(az_scenarios):
-                with cols[i]:
-                    st.markdown(f"**{s['discount_pct']:.0f}% OFF**")
-                    st.markdown(f"- **Base:** ${s['base_price']:,.2f}")
-                    st.markdown(f"- **Final:** ${s['discounted_price']:,.2f}")
-                    st.markdown(f"- **Ganancia:** ${s['profit']:,.2f}")
-                    st.markdown(f"- **Margen:** {s['margin_actual']:.1f}%")
-                    
-                    if s['profit'] < 0:
-                        st.markdown("<span class='profit-negative'>❌ PÉRDIDA</span>", unsafe_allow_html=True)
-                    elif s['margin_actual'] < 10:
-                        st.markdown("<span class='profit-negative'>⚠️ Margen bajo</span>", unsafe_allow_html=True)
-                    else:
-                        st.markdown("<span class='profit-positive'>✅ Rentable</span>", unsafe_allow_html=True)
+            if s['profit'] < 0:
+                st.markdown("<span class='profit-negative'>❌ PÉRDIDA</span>", unsafe_allow_html=True)
+            elif s['margin'] < 5:
+                st.markdown("<span class='profit-negative'>⚠️ Margen bajo</span>", unsafe_allow_html=True)
+            elif s['margin'] >= 20:
+                st.markdown("<span class='profit-positive'>✅ Excelente margen</span>", unsafe_allow_html=True)
+            else:
+                st.markdown("<span class='profit-positive'>✅ Rentable</span>", unsafe_allow_html=True)
             
-            with st.expander("📋 Desglose de comisiones Amazon (al precio con descuento)"):
-                s = max_az_scenario
-                fee_col1, fee_col2 = st.columns(2)
-                with fee_col1:
-                    st.markdown(f"""
-                    <div class="fee-breakdown">
-                        <b>Referral Fee ({s['fees']['referral_rate']*100:.0f}%):</b> ${s['fees']['referral']:,.2f}<br>
-                        <b>Tarifa mínima:</b> ${s['fees']['min_fee']:,.2f}<br>
-                        <b>Plan prorrateado:</b> ${s['fees']['plan_fee']:,.2f}<br>
-                    </div>
-                    """, unsafe_allow_html=True)
-                with fee_col2:
-                    st.markdown(f"""
-                    <div class="fee-breakdown">
-                        <b>FBA:</b> ${s['fees']['fba']:,.2f}<br>
-                        <b>Envío:</b> ${s['fees']['shipping']:,.2f}<br>
-                        <b>Total:</b> ${s['fees']['total_fees']:,.2f} ({(s['fees']['total_fees']/s['discounted_price'])*100:.1f}%)
-                    </div>
-                    """, unsafe_allow_html=True)
-    else:
-        st.warning("Selecciona al menos un nivel de descuento en la sidebar")
+            st.markdown("</div>", unsafe_allow_html=True)
+    
+    with st.expander("📋 Desglose de comisiones Amazon (al precio con descuento)"):
+        s = az_scenarios[0]
+        fee_col1, fee_col2 = st.columns(2)
+        with fee_col1:
+            st.markdown(f"""
+            <div class="fee-breakdown">
+                <b>Referral Fee ({s['fees']['referral_rate']*100:.0f}%):</b> ${s['fees']['referral']:,.2f}<br>
+                <b>Tarifa mínima:</b> ${s['fees']['min_fee']:,.2f}<br>
+                <b>Plan prorrateado:</b> ${s['fees']['plan_fee']:,.2f}<br>
+            </div>
+            """, unsafe_allow_html=True)
+        with fee_col2:
+            st.markdown(f"""
+            <div class="fee-breakdown">
+                <b>FBA:</b> ${s['fees']['fba']:,.2f}<br>
+                <b>Envío:</b> ${s['fees']['shipping']:,.2f}<br>
+                <b>Total:</b> ${s['fees']['total_fees']:,.2f} ({(s['fees']['total_fees']/s['discounted_price'])*100:.1f}%)
+            </div>
+            """, unsafe_allow_html=True)
 
 # ============================================================
 # TAB 2: COMPARADOR
 # ============================================================
 with tab2:
     st.markdown("### 📊 Comparador ML vs Amazon — Mismo Producto")
-    st.markdown("Compara el precio base necesario para aplicar descuentos en ambos marketplaces.")
+    st.markdown("Compara el precio base tope y las ganancias en ambos marketplaces desde el mismo costo.")
     
     comp_col1, comp_col2, comp_col3 = st.columns(3)
     
     with comp_col1:
         comp_cost = st.number_input("💵 Costo (MXN)", value=150.0, min_value=0.0, step=10.0, key="comp_cost")
-        comp_margin = st.slider("🎯 Margen deseado DESPUÉS del descuento (%)", 0, 80, 30, key="comp_margin") / 100
     
     with comp_col2:
         comp_ml_cat = st.selectbox("Categoría ML", list(ML_CATEGORIES.keys()), key="comp_ml_cat")
-        comp_discount = st.selectbox(
-            "Nivel de descuento a comparar",
-            [0.40, 0.45, 0.50, 0.55, 0.60],
-            index=2,
-            format_func=lambda x: f"{int(x*100)}%",
-            key="comp_discount"
-        )
     
     with comp_col3:
         comp_az_cat = st.selectbox("Categoría Amazon", list(AMAZON_CATEGORIES.keys()), key="comp_az_cat")
@@ -861,88 +822,92 @@ with tab2:
     comp_az_fba = fba_cost_per_unit if use_fba else 0
     comp_az_ship = 0 if use_fba else amazon_shipping
     
-    # Calculate for the selected discount level
-    comp_ml_base, comp_ml_disc = calculate_ml_price_for_discount(
-        comp_cost, comp_margin, comp_discount, comp_ml_cat, ml_listing_type, has_rfc, ml_shipping_cost
+    # Calcular precios base tope para ambos
+    comp_ml_base, comp_ml_60 = calculate_ml_base_price(
+        comp_cost, 0.05, 0.60, comp_ml_cat, ml_listing_type, has_rfc, ml_shipping_cost
     )
-    comp_az_base, comp_az_disc = calculate_amazon_price_for_discount(
-        comp_cost, comp_margin, comp_discount, comp_az_cat, comp_az_fba, comp_az_ship, plan_professional
+    comp_az_base, comp_az_60 = calculate_amazon_base_price(
+        comp_cost, 0.05, 0.60, comp_az_cat, comp_az_fba, comp_az_ship, plan_professional
     )
     
-    if comp_ml_base and comp_az_base:
-        comp_ml_fees = calculate_ml_fees(comp_ml_disc, comp_ml_cat, ml_listing_type, has_rfc)
-        comp_az_fees = calculate_amazon_fees(comp_az_disc, comp_az_cat, comp_az_fba, comp_az_ship, plan_professional)
-        
-        comp_ml_profit = comp_ml_disc - comp_cost - comp_ml_fees["total_fees"] - ml_shipping_cost
-        comp_az_profit = comp_az_disc - comp_cost - comp_az_fees["total_fees"] - (0 if use_fba else amazon_shipping)
-        
-        comp_ml_margin = (comp_ml_profit / comp_ml_disc) * 100 if comp_ml_disc > 0 else 0
-        comp_az_margin = (comp_az_profit / comp_az_disc) * 100 if comp_az_disc > 0 else 0
-        
-        st.markdown("---")
-        
-        c1, c2 = st.columns(2)
-        
-        with c1:
-            st.markdown("#### 🟡 Mercado Libre")
-            st.markdown(f'''
-                <div class="metric-card">
-                    <div style="font-size: 0.9rem; opacity: 0.9;">Precio Base (Publicar)</div>
-                    <div style="font-size: 2rem; font-weight: 700;">${comp_ml_base:,.2f} MXN</div>
-                </div>
-            ''', unsafe_allow_html=True)
-            st.markdown(f"""
-            - **Precio con {int(comp_discount*100)}% OFF:** ${comp_ml_disc:,.2f}
-            - **Ganancia neta:** ${comp_ml_profit:,.2f} ({comp_ml_margin:.1f}%)
-            - **Comisiones totales:** ${comp_ml_fees['total_fees']:,.2f} ({(comp_ml_fees['total_fees']/comp_ml_disc)*100:.1f}%)
-            - **Comisión ML:** {comp_ml_fees['commission_rate']*100:.1f}%
-            - **IVA retenido:** ${comp_ml_fees['iva_ret']:,.2f}
-            - **ISR retenido:** ${comp_ml_fees['isr_ret']:,.2f}
-            - **Envío:** {'Gratis (vendedor paga $' + f'{ml_shipping_cost:,.0f}' + ')' if ml_shipping_cost > 0 else 'Comprador paga'}
-            """)
-        
-        with c2:
-            st.markdown("#### 🟠 Amazon")
-            st.markdown(f'''
-                <div class="metric-card-orange">
-                    <div style="font-size: 0.9rem; opacity: 0.9;">Precio Base (Publicar)</div>
-                    <div style="font-size: 2rem; font-weight: 700;">${comp_az_base:,.2f} MXN</div>
-                </div>
-            ''', unsafe_allow_html=True)
-            st.markdown(f"""
-            - **Precio con {int(comp_discount*100)}% OFF:** ${comp_az_disc:,.2f}
-            - **Ganancia neta:** ${comp_az_profit:,.2f} ({comp_az_margin:.1f}%)
-            - **Comisiones totales:** ${comp_az_fees['total_fees']:,.2f} ({(comp_az_fees['total_fees']/comp_az_disc)*100:.1f}%)
-            - **Referral Fee:** {comp_az_fees['referral_rate']*100:.0f}%
-            - **FBA:** {'Sí ($' + f'{comp_az_fees["fba"]:,.0f}' + ')' if comp_az_fees['fba'] > 0 else 'No (FBM)'}
-            - **Envío:** {'Incluido en FBA' if use_fba else f'Vendedor paga ${comp_az_fees["shipping"]:,.0f}'}
-            - **Plan:** {'Profesional ($600/mes)' if plan_professional else 'Individual ($10/venta)'}
-            """)
-        
-        st.markdown("---")
-        
-        # Recommendation
-        if comp_ml_base < comp_az_base:
-            diff = comp_az_base - comp_ml_base
-            st.info(f"💡 **Mercado Libre requiere un precio base ${diff:,.2f} más bajo** que Amazon para el mismo margen con {int(comp_discount*100)}% de descuento. Ventaja competitiva en ML.")
-        else:
-            diff = comp_ml_base - comp_az_base
-            st.info(f"💡 **Amazon requiere un precio base ${diff:,.2f} más bajo** que Mercado Libre para el mismo margen con {int(comp_discount*100)}% de descuento. Amazon puede ser más competitivo.")
-        
-        if comp_ml_profit > comp_az_profit:
-            st.success(f"✅ **Mercado Libre es más rentable** por ${comp_ml_profit - comp_az_profit:,.2f} por unidad con {int(comp_discount*100)}% OFF.")
-        else:
-            st.success(f"✅ **Amazon es más rentable** por ${comp_az_profit - comp_ml_profit:,.2f} por unidad con {int(comp_discount*100)}% OFF.")
+    # Simular todos los descuentos
+    comp_ml_scenarios = []
+    comp_az_scenarios = []
+    for d in [0.60, 0.50, 0.40, 0.30]:
+        comp_ml_scenarios.append(calculate_ml_from_fixed_base(comp_cost, comp_ml_base, d, comp_ml_cat, ml_listing_type, has_rfc, ml_shipping_cost))
+        comp_az_scenarios.append(calculate_amazon_from_fixed_base(comp_cost, comp_az_base, d, comp_az_cat, comp_az_fba, comp_az_ship, plan_professional))
     
+    st.markdown("---")
+    
+    # Precios base tope
+    st.markdown("#### ⭐ Precios Base Tope (5% ganancia con 60% OFF)")
+    
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("#### 🟡 Mercado Libre")
+        st.markdown(f'''
+            <div class="metric-card">
+                <div style="font-size: 0.9rem; opacity: 0.9;">Precio Base Tope</div>
+                <div style="font-size: 2rem; font-weight: 700;">${comp_ml_base:,.2f} MXN</div>
+            </div>
+        ''', unsafe_allow_html=True)
+        
+        for s in comp_ml_scenarios:
+            st.markdown(f"""
+            - **{s['discount_pct']:.0f}% OFF:** ${s['discounted_price']:,.2f} → Ganancia: ${s['profit']:,.2f} ({s['margin']:.1f}%)
+            """)
+    
+    with c2:
+        st.markdown("#### 🟠 Amazon")
+        st.markdown(f'''
+            <div class="metric-card-orange">
+                <div style="font-size: 0.9rem; opacity: 0.9;">Precio Base Tope</div>
+                <div style="font-size: 2rem; font-weight: 700;">${comp_az_base:,.2f} MXN</div>
+            </div>
+        ''', unsafe_allow_html=True)
+        
+        for s in comp_az_scenarios:
+            st.markdown(f"""
+            - **{s['discount_pct']:.0f}% OFF:** ${s['discounted_price']:,.2f} → Ganancia: ${s['profit']:,.2f} ({s['margin']:.1f}%)
+            """)
+    
+    # Comparación tabla
+    st.markdown("---")
+    st.markdown("#### 📋 Tabla Comparativa")
+    
+    comp_data = []
+    for i in range(4):
+        ml_s = comp_ml_scenarios[i]
+        az_s = comp_az_scenarios[i]
+        comp_data.append({
+            "Descuento": f"{ml_s['discount_pct']:.0f}%",
+            "ML Precio Final": f"${ml_s['discounted_price']:,.2f}",
+            "ML Ganancia": f"${ml_s['profit']:,.2f}",
+            "ML Margen": f"{ml_s['margin']:.1f}%",
+            "AZ Precio Final": f"${az_s['discounted_price']:,.2f}",
+            "AZ Ganancia": f"${az_s['profit']:,.2f}",
+            "AZ Margen": f"{az_s['margin']:.1f}%",
+            "Diferencia": f"${ml_s['profit'] - az_s['profit']:,.2f}",
+        })
+    
+    df_comp = pd.DataFrame(comp_data)
+    st.dataframe(df_comp, use_container_width=True, hide_index=True)
+    
+    # Recomendación
+    ml_total = sum(s['profit'] for s in comp_ml_scenarios)
+    az_total = sum(s['profit'] for s in comp_az_scenarios)
+    
+    if ml_total > az_total:
+        st.success(f"💡 **Mercado Libre genera ${ml_total - az_total:,.2f} más de ganancia** acumulada en los 4 escenarios.")
     else:
-        st.error("❌ No se puede calcular. El margen + comisiones + impuestos superan el 100%.")
+        st.success(f"💡 **Amazon genera ${az_total - ml_total:,.2f} más de ganancia** acumulada en los 4 escenarios.")
 
 # ============================================================
 # TAB 3: SHOPIFY SYNC
 # ============================================================
 with tab3:
     st.markdown("### 🔄 Sincronizar con Shopify — morekashop1")
-    st.markdown("Carga automáticamente los productos de morekashop1 con sus costos para calcular precios con descuento.")
+    st.markdown("Carga productos de morekashop1 y calcula precio base tope para 5% ganancia con 60% OFF, luego simula 60%, 50%, 40%, 30% OFF.")
     
     if st.button("🔄 Cargar Productos de Shopify", type="primary"):
         with st.spinner("Conectando a morekashop1..."):
@@ -965,21 +930,13 @@ with tab3:
                 st.success(f"✅ {len(df_with_cost)} productos con costo listos para calcular")
                 
                 st.markdown("---")
-                st.markdown("#### ⚙️ Configuración para cálculo masivo")
+                st.markdown("#### 📋 Configuración para cálculo masivo")
                 
-                bulk_margin = st.slider("Margen deseado DESPUÉS del descuento (%)", 0, 80, 30, key="bulk_margin") / 100
-                bulk_discount = st.selectbox(
-                    "Nivel de descuento a calcular",
-                    [0.40, 0.45, 0.50, 0.55, 0.60],
-                    index=2,
-                    format_func=lambda x: f"{int(x*100)}%",
-                    key="bulk_discount"
-                )
                 bulk_ml_cat = st.selectbox("Categoría ML por defecto", list(ML_CATEGORIES.keys()), key="bulk_ml_cat")
                 bulk_az_cat = st.selectbox("Categoría Amazon por defecto", list(AMAZON_CATEGORIES.keys()), key="bulk_az_cat")
                 
-                if st.button("🚀 Calcular Precios para Todos", type="primary"):
-                    with st.spinner("Calculando precios..."):
+                if st.button("🚀 Calcular Precios Tope para Todos", type="primary"):
+                    with st.spinner("Calculando precios tope..."):
                         results = []
                         
                         for _, row in df_with_cost.iterrows():
@@ -987,34 +944,51 @@ with tab3:
                             sku = row["SKU"]
                             titulo = row["Título"]
                             
-                            # ML
-                            ml_base, ml_disc = calculate_ml_price_for_discount(
-                                costo, bulk_margin, bulk_discount, bulk_ml_cat, ml_listing_type, has_rfc, ml_shipping_cost
+                            # ML - Precio base tope para 5% con 60% OFF
+                            ml_base, _ = calculate_ml_base_price(
+                                costo, 0.05, 0.60, bulk_ml_cat, ml_listing_type, has_rfc, ml_shipping_cost
                             )
-                            ml_fees = calculate_ml_fees(ml_disc, bulk_ml_cat, ml_listing_type, has_rfc)
-                            ml_profit = ml_disc - costo - ml_fees["total_fees"] - ml_shipping_cost
                             
-                            # Amazon
+                            # Simular descuentos desde ese precio base
+                            ml_60 = calculate_ml_from_fixed_base(costo, ml_base, 0.60, bulk_ml_cat, ml_listing_type, has_rfc, ml_shipping_cost)
+                            ml_50 = calculate_ml_from_fixed_base(costo, ml_base, 0.50, bulk_ml_cat, ml_listing_type, has_rfc, ml_shipping_cost)
+                            ml_40 = calculate_ml_from_fixed_base(costo, ml_base, 0.40, bulk_ml_cat, ml_listing_type, has_rfc, ml_shipping_cost)
+                            ml_30 = calculate_ml_from_fixed_base(costo, ml_base, 0.30, bulk_ml_cat, ml_listing_type, has_rfc, ml_shipping_cost)
+                            
+                            # Amazon - Precio base tope para 5% con 60% OFF
                             az_fba = fba_cost_per_unit if use_fba else 0
                             az_ship = 0 if use_fba else amazon_shipping
-                            az_base, az_disc = calculate_amazon_price_for_discount(
-                                costo, bulk_margin, bulk_discount, bulk_az_cat, az_fba, az_ship, plan_professional
+                            az_base, _ = calculate_amazon_base_price(
+                                costo, 0.05, 0.60, bulk_az_cat, az_fba, az_ship, plan_professional
                             )
-                            az_fees = calculate_amazon_fees(az_disc, bulk_az_cat, az_fba, az_ship, plan_professional)
-                            az_profit = az_disc - costo - az_fees["total_fees"] - (0 if use_fba else amazon_shipping)
+                            
+                            az_60 = calculate_amazon_from_fixed_base(costo, az_base, 0.60, bulk_az_cat, az_fba, az_ship, plan_professional)
+                            az_50 = calculate_amazon_from_fixed_base(costo, az_base, 0.50, bulk_az_cat, az_fba, az_ship, plan_professional)
+                            az_40 = calculate_amazon_from_fixed_base(costo, az_base, 0.40, bulk_az_cat, az_fba, az_ship, plan_professional)
+                            az_30 = calculate_amazon_from_fixed_base(costo, az_base, 0.30, bulk_az_cat, az_fba, az_ship, plan_professional)
                             
                             result_row = {
                                 "SKU": sku,
                                 "Producto": titulo,
                                 "Costo": costo,
-                                "ML Precio Base": round(ml_base, 2),
-                                "ML Precio con {int(bulk_discount*100)}% OFF": round(ml_disc, 2),
-                                "ML Ganancia": round(ml_profit, 2),
-                                "ML Margen": round((ml_profit/ml_disc)*100, 1) if ml_disc else 0,
-                                "Amazon Precio Base": round(az_base, 2),
-                                "Amazon Precio con {int(bulk_discount*100)}% OFF": round(az_disc, 2),
-                                "Amazon Ganancia": round(az_profit, 2),
-                                "Amazon Margen": round((az_profit/az_disc)*100, 1) if az_disc else 0,
+                                "ML Base Tope": round(ml_base, 2),
+                                "ML 60% OFF": round(ml_60['discounted_price'], 2),
+                                "ML 60% Ganancia": round(ml_60['profit'], 2),
+                                "ML 50% OFF": round(ml_50['discounted_price'], 2),
+                                "ML 50% Ganancia": round(ml_50['profit'], 2),
+                                "ML 40% OFF": round(ml_40['discounted_price'], 2),
+                                "ML 40% Ganancia": round(ml_40['profit'], 2),
+                                "ML 30% OFF": round(ml_30['discounted_price'], 2),
+                                "ML 30% Ganancia": round(ml_30['profit'], 2),
+                                "AZ Base Tope": round(az_base, 2),
+                                "AZ 60% OFF": round(az_60['discounted_price'], 2),
+                                "AZ 60% Ganancia": round(az_60['profit'], 2),
+                                "AZ 50% OFF": round(az_50['discounted_price'], 2),
+                                "AZ 50% Ganancia": round(az_50['profit'], 2),
+                                "AZ 40% OFF": round(az_40['discounted_price'], 2),
+                                "AZ 40% Ganancia": round(az_40['profit'], 2),
+                                "AZ 30% OFF": round(az_30['discounted_price'], 2),
+                                "AZ 30% Ganancia": round(az_30['profit'], 2),
                             }
                             results.append(result_row)
                         
@@ -1028,18 +1002,18 @@ with tab3:
                         st.download_button(
                             "📥 Descargar CSV",
                             csv_buffer.getvalue(),
-                            f"precios_marketplace_{int(bulk_discount*100)}off_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                            f"precios_tope_marketplace_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
                             "text/csv"
                         )
                         
                         try:
                             excel_buffer = io.BytesIO()
                             with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-                                df_results.to_excel(writer, index=False, sheet_name=f'Precios_{int(bulk_discount*100)}OFF')
+                                df_results.to_excel(writer, index=False, sheet_name='Precios_Tope')
                             st.download_button(
                                 "📥 Descargar Excel",
                                 excel_buffer.getvalue(),
-                                f"precios_marketplace_{int(bulk_discount*100)}off_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                                f"precios_tope_marketplace_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
                                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                             )
                         except:
@@ -1066,7 +1040,7 @@ with tab3:
 st.markdown("---")
 st.markdown(
     f"<div style='text-align: center; color: #999; font-size: 0.8rem;'>"
-    f"Marketplace Pricing Calculator México 2026 • Precios base para descuentos 40-50% • Comisiones actualizadas: Junio 2026"
+    f"Marketplace Pricing Calculator México 2026 • Precio base tope = 5% ganancia con 60% OFF • Comisiones actualizadas: Junio 2026"
     f"</div>",
     unsafe_allow_html=True
 )
