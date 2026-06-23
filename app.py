@@ -693,8 +693,19 @@ with tab1:
             st.markdown("</div>", unsafe_allow_html=True)
     
     # Fee breakdown
-    with st.expander("📋 Desglose de comisiones ML (al precio con descuento)"):
+    with st.expander("📋 Desglose completo de costos (al precio con descuento)"):
         s = ml_scenarios[0]  # 60% OFF
+        
+        st.markdown("#### 💰 Costos del Producto")
+        st.markdown(f"""
+        <div class="fee-breakdown">
+            <b>Costo del producto:</b> ${cost:,.2f}<br>
+            <b>Publicidad ({ad_cost_pct*100:.0f}% del precio de venta):</b> ${s['ad_cost']:,.2f}<br>
+            <b>Costo total del producto:</b> ${s['total_cost']:,.2f}
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.markdown("#### 📦 Comisiones de Mercado Libre")
         fee_col1, fee_col2 = st.columns(2)
         with fee_col1:
             st.markdown(f"""
@@ -712,9 +723,19 @@ with tab1:
                 <b>IVA retenido ({iva_label}):</b> ${s['fees']['iva_ret']:,.2f}<br>
                 <b>ISR retenido ({isr_label}):</b> ${s['fees']['isr_ret']:,.2f}<br>
                 <b>Envío:</b> ${ml_shipping_cost:,.2f}<br>
-                <b>Total comisiones:</b> ${s['fees']['total_fees']:,.2f} + Envío ${ml_shipping_cost:,.2f}
+                <b><b>Total comisiones ML:</b></b> ${s['fees']['total_fees']:,.2f} + Envío ${ml_shipping_cost:,.2f}
             </div>
             """, unsafe_allow_html=True)
+        
+        st.markdown("#### 🧮 Fórmula de Ganancia")
+        st.markdown(f"""
+        <div class="fee-breakdown">
+            <b>Precio con descuento:</b> ${s['discounted_price']:,.2f}<br>
+            <b>− Costo total (producto + publicidad):</b> ${s['total_cost']:,.2f}<br>
+            <b>− Comisiones ML + Envío:</b> ${s['fees']['total_fees'] + ml_shipping_cost:,.2f}<br>
+            <b>= Ganancia neta:</b> ${s['profit']:,.2f} ({s['margin']:.1f}% margen)
+        </div>
+        """, unsafe_allow_html=True)
     
     st.markdown("---")
     
@@ -816,8 +837,19 @@ with tab1:
             
             st.markdown("</div>", unsafe_allow_html=True)
     
-    with st.expander("📋 Desglose de comisiones Amazon (al precio con descuento)"):
+    with st.expander("📋 Desglose completo de costos (al precio con descuento)"):
         s = az_scenarios[0]
+        
+        st.markdown("#### 💰 Costos del Producto")
+        st.markdown(f"""
+        <div class="fee-breakdown">
+            <b>Costo del producto:</b> ${cost:,.2f}<br>
+            <b>Publicidad ({ad_cost_pct*100:.0f}% del precio de venta):</b> ${s['ad_cost']:,.2f}<br>
+            <b>Costo total del producto:</b> ${s['total_cost']:,.2f}
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.markdown("#### 📦 Comisiones de Amazon")
         fee_col1, fee_col2 = st.columns(2)
         with fee_col1:
             st.markdown(f"""
@@ -832,9 +864,19 @@ with tab1:
             <div class="fee-breakdown">
                 <b>FBA:</b> ${s['fees']['fba']:,.2f}<br>
                 <b>Envío:</b> ${s['fees']['shipping']:,.2f}<br>
-                <b>Total:</b> ${s['fees']['total_fees']:,.2f} ({(s['fees']['total_fees']/s['discounted_price'])*100:.1f}%)
+                <b>Total comisiones Amazon:</b> ${s['fees']['total_fees']:,.2f} ({(s['fees']['total_fees']/s['discounted_price'])*100:.1f}%)
             </div>
             """, unsafe_allow_html=True)
+        
+        st.markdown("#### 🧮 Fórmula de Ganancia")
+        st.markdown(f"""
+        <div class="fee-breakdown">
+            <b>Precio con descuento:</b> ${s['discounted_price']:,.2f}<br>
+            <b>− Costo total (producto + publicidad):</b> ${s['total_cost']:,.2f}<br>
+            <b>− Comisiones Amazon + Envío:</b> ${s['fees']['total_fees'] + s['fees']['shipping']:,.2f}<br>
+            <b>= Ganancia neta:</b> ${s['profit']:,.2f} ({s['margin']:.1f}% margen)
+        </div>
+        """, unsafe_allow_html=True)
 
 # ============================================================
 # TAB 2: COMPARADOR
