@@ -14,6 +14,305 @@ import time
 import io
 import os
 from datetime import datetime
+import gspread
+from google.oauth2.service_account import Credentials
+
+# ============================================================
+# CONFIGURACIÓN GOOGLE SHEETS — PESOS Y MEDIDAS
+# ============================================================
+GSHEETS_SCOPES = [
+    'https://www.googleapis.com/auth/spreadsheets',
+    'https://www.googleapis.com/auth/drive'
+]
+PESOS_MEDIDAS_SHEET_ID = "1ZiqaICBBQ68lYlLG5Xx9oCPyHwruOHLDrR_TNYt3Sjg"
+
+def get_gsheets_credentials():
+    """Obtiene credenciales de Google Sheets desde secrets o archivo"""
+    try:
+        creds_dict = st.secrets.get("google_sheets", {})
+        if creds_dict:
+            return Credentials.from_service_account_info(creds_dict, scopes=GSHEETS_SCOPES)
+    except:
+        pass
+    
+    creds_path = "/root/.openclaw/workspace/pesos-medidas-moreka/pesos-y-medidas-credentials.json"
+    if os.path.exists(creds_path):
+        return Credentials.from_service_account_file(creds_path, scopes=GSHEETS_SCOPES)
+    
+    return None
+
+@st.cache_data(ttl=300)
+def fetch_pesos_medidas():
+    """Lee datos de pesos y medidas desde Google Sheets"""
+    try:
+        creds = get_gsheets_credentials()
+        if not creds:
+            return None, "Credenciales de Google Sheets no configuradas"
+        
+        client = gspread.authorize(creds)
+        sh = client.open_by_key(PESOS_MEDIDAS_SHEET_ID)
+        worksheet = sh.sheet1
+        values = worksheet.get_all_values()
+        
+        if not values or len(values) < 2:
+            return None, "Hoja vacía"
+        
+        headers = values[0]
+        headers = ['SKU' if h == '.' else h for h in headers]
+        headers = [h if h else f"Col_{i}" for i, h in enumerate(headers)]
+        
+        records = []
+        for row in values[1:]:
+            if not any(cell.strip() for cell in row):
+                continue
+            record = {headers[i]: row[i] if i < len(row) else "" for i in range(len(headers))}
+            records.append(record)
+        
+        return records, None
+    except Exception as e:
+        return None, str(e)
+
+def get_product_dimensions(sku, modelo, pesos_medidas_data):
+    """Busca pesos y medidas por SKU o modelo"""
+    if not pesos_medidas_data:
+        return None
+    
+    sku_lower = str(sku).strip().lower() if sku else ""
+    modelo_lower = str(modelo).strip().lower() if modelo else ""
+    
+    for record in pesos_medidas_data:
+        record_sku = str(record.get('SKU', '')).strip().lower()
+        record_modelo = str(record.get('Modelo', '')).strip().lower()
+        
+        if (sku_lower and record_sku == sku_lower) or (modelo_lower and record_modelo == modelo_lower):
+            return {
+                'sku': record.get('SKU', ''),
+                'modelo': record.get('Modelo', ''),
+                'titulo': record.get('Titutlo', ''),
+                'ancho_cm': parse_float(record.get('Ancho cm', 0)),
+                'largo_cm': parse_float(record.get('Largo cm', 0)),
+                'profundidad_cm': parse_float(record.get('Profundidad cm', 0)),
+                'peso_kg': parse_float(record.get('Peso (kg)', 0)),
+                'largo_caja_cm': parse_float(record.get('Largo caja cm', 0)),
+                'ancho_caja_cm': parse_float(record.get('Ancho caja cm', 0)),
+                'profundidad_caja_cm': parse_float(record.get('Profundidad caja cm', 0)),
+                'peso_caja_kg': parse_float(record.get('Pesos caja (kg)', 0)),
+                'peso_volumetrico': parse_float(record.get('Peso Volumétrico (kg)', 0)),
+            }
+    
+    return None
+
+def parse_float(value, default=0.0):
+    """Convierte valor a float, maneja comas como decimales"""
+    if not value:
+        return default
+    try:
+        if isinstance(value, str):
+            value = value.replace(',', '.').replace(' ', '').strip()
+        return float(value)
+    except (ValueError, TypeError):
+        return default
+
+def calculate_volumetric_weight(largo, ancho, profundidad):
+    """Calcula peso volumétrico: largo × ancho × alto / 5000 (kg)"""
+    if largo > 0 and ancho > 0 and profundidad > 0:
+        return (largo * ancho * profundidad) / 5000
+    return 0
+
+def get_billable_weight(peso_real, largo, ancho, profundidad):
+    """Peso facturable: el mayor entre peso real y volumétrico"""
+    peso_volumetrico = calculate_volumetric_weight(largo, ancho, profundidad)
+    return max(peso_real, peso_volumetrico)
+
+# ============================================================
+# TARIFAS DE ENVÍO MERCADO LIBRE MÉXICO — ABRIL 2026
+# Productos < $299: costo variable por peso
+# ============================================================
+def get_ml_shipping_cost(price, peso_kg, largo, ancho, profundidad):
+    """
+    Calcula costo de envío de Mercado Libre México basado en peso y dimensiones.
+    Desde abril 2026: productos < $299 usan tarifa variable por peso.
+    Productos >= $299: envío gratis (ML cubre parcialmente según reputación).
+    """
+    if price >= 299:
+        # Envío gratis: ML cubre parte, vendedor paga el resto
+        # Aproximación: vendedor paga ~50% del costo real
+        billable_weight = get_billable_weight(peso_kg, largo, ancho, profundidad)
+        return calculate_ml_shipping_table(billable_weight, price) * 0.5
+    
+    billable_weight = get_billable_weight(peso_kg, largo, ancho, profundidad)
+    return calculate_ml_shipping_table(billable_weight, price)
+
+def calculate_ml_shipping_table(peso_kg, price):
+    """Tabla de costos de envío ML México — Abril 2026"""
+    
+    # Determinar rango de precio
+    if price < 99:
+        price_range = "low"
+    elif price < 199:
+        price_range = "mid"
+    elif price < 299:
+        price_range = "high"
+    else:
+        price_range = "free"
+    
+    # Tabla de costos por peso (MXN)
+    # Fuente: Mercado Libre México — Abril 2026
+    shipping_table = {
+        "low": {   # $0 - $98.99
+            0.3: 25, 0.5: 28.50, 1.0: 33, 2.0: 35, 3.0: 37, 4.0: 39,
+            5.0: 40, 7.0: 45, 9.0: 51, 12.0: 59, 15.0: 69, 20.0: 81,
+            30.0: 102, 40.0: 126, 50.0: 163, 60.0: 183
+        },
+        "mid": {   # $99 - $198.99
+            0.3: 32, 0.5: 34, 1.0: 38, 2.0: 40, 3.0: 46, 4.0: 50,
+            5.0: 53, 7.0: 59, 9.0: 67, 12.0: 78, 15.0: 92, 20.0: 108,
+            30.0: 137, 40.0: 170, 50.0: 220, 60.0: 247
+        },
+        "high": {  # $199 - $298.99
+            0.3: 35, 0.5: 38, 1.0: 39, 2.0: 41, 3.0: 48, 4.0: 54,
+            5.0: 59, 7.0: 70, 9.0: 81, 12.0: 96, 15.0: 113, 20.0: 140,
+            30.0: 195, 40.0: 250, 50.0: 305, 60.0: 334
+        },
+        "free": {  # >= $299 (envío gratis — vendedor paga 50% aprox)
+            0.3: 26.20, 0.5: 28, 1.0: 29.80, 2.0: 33.80, 3.0: 38,
+            5.0: 44, 7.0: 49, 9.0: 55.80, 12.0: 64.60, 15.0: 76,
+            20.0: 89, 30.0: 112.60
+        }
+    }
+    
+    table = shipping_table.get(price_range, shipping_table["low"])
+    
+    # Encontrar el rango de peso correspondiente
+    pesos = sorted(table.keys())
+    for i, p in enumerate(pesos):
+        if peso_kg <= p:
+            return table[p]
+    
+    # Si supera el máximo, usar extrapolación
+    return table[pesos[-1]] + (peso_kg - pesos[-1]) * 5
+
+# ============================================================
+# TARIFAS FBA AMAZON MÉXICO — 2026
+# Basadas en tamaño tier y peso
+# ============================================================
+def get_amazon_fba_fee(peso_kg, largo_cm, ancho_cm, profundidad_cm):
+    """
+    Calcula tarifa FBA de Amazon México basada en tamaño y peso.
+    Usa peso real o volumétrico (el mayor).
+    """
+    # Convertir dimensiones a pulgadas para comparar
+    largo_in = largo_cm / 2.54
+    ancho_in = ancho_cm / 2.54
+    profundidad_in = profundidad_cm / 2.54
+    peso_lb = peso_kg * 2.20462
+    
+    # Peso volumétrico en kg
+    peso_volumetrico_kg = calculate_volumetric_weight(largo_cm, ancho_cm, profundidad_cm)
+    billable_weight_kg = max(peso_kg, peso_volumetrico_kg)
+    billable_weight_lb = billable_weight_kg * 2.20462
+    
+    # Determinar size tier
+    # Small Standard: max 15" x 12" x 0.75", up to 12 oz (0.34 kg)
+    # Large Standard: max 18" x 14" x 8", up to 20 lbs (9.07 kg)
+    # Large Bulky: 21-50 lbs, max 59" longest side, 130" perimeter
+    # Extra-Large: 51-70 lbs
+    
+    max_dimension = max(largo_in, ancho_in, profundidad_in) if any([largo_in, ancho_in, profundidad_in]) else 0
+    perimeter = largo_in + ancho_in + profundidad_in if all([largo_in, ancho_in, profundidad_in]) else 0
+    
+    # Tarifas FBA México 2026 (aproximadas en MXN, basadas en US fees convertidos)
+    # Small Standard
+    if max_dimension <= 15 and max(largo_in, ancho_in) <= 12 and profundidad_in <= 0.75 and billable_weight_lb <= 0.75:
+        if billable_weight_lb <= 0.25:
+            return 58.0  # ~$3.06 USD
+        elif billable_weight_lb <= 0.5:
+            return 61.0  # ~$3.22 USD
+        else:
+            return 65.0  # ~$3.44 USD
+    
+    # Large Standard
+    if max_dimension <= 18 and max(largo_in, ancho_in) <= 14 and profundidad_in <= 8 and billable_weight_lb <= 20:
+        if billable_weight_lb <= 0.25:
+            return 73.0   # ~$3.86 USD
+        elif billable_weight_lb <= 0.5:
+            return 77.0   # ~$4.08 USD
+        elif billable_weight_lb <= 0.75:
+            return 81.0   # ~$4.28 USD
+        elif billable_weight_lb <= 1.0:
+            return 88.0   # ~$4.65 USD
+        elif billable_weight_lb <= 1.5:
+            return 104.0  # ~$5.50 USD
+        elif billable_weight_lb <= 2.0:
+            return 115.0  # ~$6.10 USD
+        elif billable_weight_lb <= 2.5:
+            return 121.0  # ~$6.39 USD
+        elif billable_weight_lb <= 3.0:
+            return 128.0  # ~$6.75 USD
+        else:
+            # +$0.16 per half-pound above 3 lbs
+            extra_half_pounds = max(0, (billable_weight_lb - 3.0) / 0.5)
+            return 128.0 + (extra_half_pounds * 3.0)
+    
+    # Large Bulky (21-50 lbs)
+    if billable_weight_lb <= 50 and max_dimension <= 59 and perimeter <= 130:
+        base = 184.0  # ~$9.73 USD
+        extra = max(0, billable_weight_lb - 2.0) * 8.0  # ~$0.42/lb
+        return base + extra
+    
+    # Extra-Large (51-70 lbs)
+    if billable_weight_lb <= 70:
+        base = 477.0  # ~$25.21 USD
+        extra = max(0, billable_weight_lb - 51.0) * 8.0  # ~$0.42/lb
+        return base + extra
+    
+    # Special Oversize (70+ lbs)
+    base = 2597.0  # ~$137.32 USD
+    extra = max(0, billable_weight_lb - 90.0) * 15.0  # ~$0.79/lb
+    return base + extra
+
+def get_amazon_size_tier(largo_cm, ancho_cm, profundidad_cm, peso_kg):
+    """Determina el tier de tamaño de Amazon basado en dimensiones y peso"""
+    largo_in = largo_cm / 2.54
+    ancho_in = ancho_cm / 2.54
+    profundidad_in = profundidad_cm / 2.54
+    peso_lb = peso_kg * 2.20462
+    
+    max_dimension = max(largo_in, ancho_in, profundidad_in) if any([largo_in, ancho_in, profundidad_in]) else 0
+    perimeter = largo_in + ancho_in + profundidad_in if all([largo_in, ancho_in, profundidad_in]) else 0
+    
+    if max_dimension <= 15 and max(largo_in, ancho_in) <= 12 and profundidad_in <= 0.75 and peso_lb <= 0.75:
+        return "Small Standard"
+    elif max_dimension <= 18 and max(largo_in, ancho_in) <= 14 and profundidad_in <= 8 and peso_lb <= 20:
+        return "Large Standard"
+    elif peso_lb <= 50 and max_dimension <= 59 and perimeter <= 130:
+        return "Large Bulky"
+    elif peso_lb <= 70:
+        return "Extra-Large"
+    else:
+        return "Special Oversize"
+
+def get_amazon_fbm_shipping(peso_kg, largo_cm, ancho_cm, profundidad_cm):
+    """Costo aproximado de envío FBM (vendedor envía)"""
+    # Tarifas aproximadas de paquetería México 2026
+    billable_weight = get_billable_weight(peso_kg, largo_cm, ancho_cm, profundidad_cm)
+    
+    if billable_weight <= 0.5:
+        return 50.0
+    elif billable_weight <= 1.0:
+        return 70.0
+    elif billable_weight <= 2.0:
+        return 90.0
+    elif billable_weight <= 3.0:
+        return 110.0
+    elif billable_weight <= 5.0:
+        return 140.0
+    elif billable_weight <= 10.0:
+        return 200.0
+    elif billable_weight <= 20.0:
+        return 300.0
+    else:
+        return 400.0 + (billable_weight - 20.0) * 15
 
 # ============================================================
 # CONFIGURACIÓN DE PÁGINA
@@ -240,44 +539,52 @@ def calculate_ml_fees(price, category_name, listing_type="classic", has_rfc=True
         "net_received": price - total_fees,
     }
 
-def calculate_ml_base_price(cost, target_margin, discount_pct, category_name, listing_type="classic", has_rfc=True, shipping_cost=0, ad_cost_pct=0.10):
+def calculate_ml_base_price(cost, target_margin, discount_pct, category_name, listing_type="classic", has_rfc=True, shipping_cost=0, ad_cost_pct=0.10, peso_kg=0, largo_cm=0, ancho_cm=0, profundidad_cm=0):
     """Calcula el precio BASE necesario para que el precio con descuento mantenga el margen deseado.
-    Incluye costo de publicidad como % del precio de venta."""
+    Incluye costo de publicidad como % del precio de venta y envío basado en peso/dimensiones."""
     
-    # Iteración: publicidad depende del precio con descuento, que depende del costo total...
     price_discounted = cost * 2.5  # Estimación inicial
     
     for _ in range(30):
-        # Costo de publicidad = % del precio con descuento
         ad_cost = price_discounted * ad_cost_pct
-        total_cost = cost + ad_cost
+        
+        # Calcular envío basado en peso y dimensiones
+        if peso_kg > 0:
+            shipping = get_ml_shipping_cost(price_discounted, peso_kg, largo_cm, ancho_cm, profundidad_cm)
+        else:
+            shipping = shipping_cost
+        
+        total_cost = cost + ad_cost + shipping
         
         fees = calculate_ml_fees(price_discounted, category_name, listing_type, has_rfc)
-        total_fees = fees["total_fees"] + shipping_cost
+        total_fees = fees["total_fees"]
         
-        # price_discounted - total_cost - total_fees = target_margin * price_discounted
-        # price_discounted * (1 - target_margin) = total_cost + total_fees
         new_price_discounted = (total_cost + total_fees) / (1 - target_margin)
         
         if abs(new_price_discounted - price_discounted) < 0.01:
             break
         price_discounted = new_price_discounted
     
-    # Precio base = Precio con descuento / (1 - discount)
     price_base = price_discounted / (1 - discount_pct)
     
     return round(price_base, 2), round(price_discounted, 2)
 
-def calculate_ml_from_fixed_base(cost, base_price, discount_pct, category_name, listing_type="classic", has_rfc=True, shipping_cost=0, ad_cost_pct=0.10):
-    """Desde un precio base FIJO, calcula ganancia con un % de descuento dado. Incluye publicidad."""
+def calculate_ml_from_fixed_base(cost, base_price, discount_pct, category_name, listing_type="classic", has_rfc=True, shipping_cost=0, ad_cost_pct=0.10, peso_kg=0, largo_cm=0, ancho_cm=0, profundidad_cm=0):
+    """Desde un precio base FIJO, calcula ganancia con un % de descuento dado. Incluye publicidad y envío por peso."""
     price_discounted = base_price * (1 - discount_pct)
     
-    # Costo de publicidad = % del precio con descuento
     ad_cost = price_discounted * ad_cost_pct
-    total_cost = cost + ad_cost
+    
+    # Calcular envío basado en peso y dimensiones
+    if peso_kg > 0:
+        shipping = get_ml_shipping_cost(price_discounted, peso_kg, largo_cm, ancho_cm, profundidad_cm)
+    else:
+        shipping = shipping_cost
+    
+    total_cost = cost + ad_cost + shipping
     
     fees = calculate_ml_fees(price_discounted, category_name, listing_type, has_rfc)
-    total_fees = fees["total_fees"] + shipping_cost
+    total_fees = fees["total_fees"]
     
     profit = price_discounted - total_cost - total_fees
     margin = (profit / price_discounted) * 100 if price_discounted > 0 else 0
@@ -290,6 +597,7 @@ def calculate_ml_from_fixed_base(cost, base_price, discount_pct, category_name, 
         "discount_amount": round(base_price - price_discounted, 2),
         "product_cost": cost,
         "ad_cost": round(ad_cost, 2),
+        "shipping_cost": round(shipping, 2),
         "total_cost": round(total_cost, 2),
         "fees": fees,
         "profit": round(profit, 2),
@@ -326,16 +634,29 @@ def calculate_amazon_fees(price, category_name, fba_fee=0, shipping_cost=0, plan
         "net_received": price - total_fees,
     }
 
-def calculate_amazon_base_price(cost, target_margin, discount_pct, category_name, fba_fee=0, shipping_cost=0, plan_professional=True, ad_cost_pct=0.10):
-    """Calcula el precio BASE necesario para que el precio con descuento mantenga el margen deseado. Incluye publicidad."""
+def calculate_amazon_base_price(cost, target_margin, discount_pct, category_name, fba_fee=0, shipping_cost=0, plan_professional=True, ad_cost_pct=0.10, peso_kg=0, largo_cm=0, ancho_cm=0, profundidad_cm=0, use_fba=False):
+    """Calcula el precio BASE necesario para que el precio con descuento mantenga el margen deseado. Incluye publicidad y envío por peso/dimensiones."""
     
     price_discounted = cost * 2.5  # Estimación inicial
     
     for _ in range(30):
         ad_cost = price_discounted * ad_cost_pct
-        total_cost = cost + ad_cost
         
-        fees = calculate_amazon_fees(price_discounted, category_name, fba_fee, shipping_cost, plan_professional)
+        # Calcular FBA fee basado en peso y dimensiones
+        if use_fba and peso_kg > 0:
+            fba = get_amazon_fba_fee(peso_kg, largo_cm, ancho_cm, profundidad_cm)
+        else:
+            fba = fba_fee
+        
+        # Calcular envío FBM basado en peso y dimensiones
+        if not use_fba and peso_kg > 0:
+            shipping = get_amazon_fbm_shipping(peso_kg, largo_cm, ancho_cm, profundidad_cm)
+        else:
+            shipping = shipping_cost
+        
+        total_cost = cost + ad_cost + shipping
+        
+        fees = calculate_amazon_fees(price_discounted, category_name, fba, 0, plan_professional)
         total_fees = fees["total_fees"]
         
         new_price_discounted = (total_cost + total_fees) / (1 - target_margin)
@@ -348,14 +669,27 @@ def calculate_amazon_base_price(cost, target_margin, discount_pct, category_name
     
     return round(price_base, 2), round(price_discounted, 2)
 
-def calculate_amazon_from_fixed_base(cost, base_price, discount_pct, category_name, fba_fee=0, shipping_cost=0, plan_professional=True, ad_cost_pct=0.10):
-    """Desde un precio base FIJO, calcula ganancia con un % de descuento dado. Incluye publicidad."""
+def calculate_amazon_from_fixed_base(cost, base_price, discount_pct, category_name, fba_fee=0, shipping_cost=0, plan_professional=True, ad_cost_pct=0.10, peso_kg=0, largo_cm=0, ancho_cm=0, profundidad_cm=0, use_fba=False):
+    """Desde un precio base FIJO, calcula ganancia con un % de descuento dado. Incluye publicidad y envío por peso."""
     price_discounted = base_price * (1 - discount_pct)
     
     ad_cost = price_discounted * ad_cost_pct
-    total_cost = cost + ad_cost
     
-    fees = calculate_amazon_fees(price_discounted, category_name, fba_fee, shipping_cost, plan_professional)
+    # Calcular FBA fee basado en peso y dimensiones
+    if use_fba and peso_kg > 0:
+        fba = get_amazon_fba_fee(peso_kg, largo_cm, ancho_cm, profundidad_cm)
+    else:
+        fba = fba_fee
+    
+    # Calcular envío FBM basado en peso y dimensiones
+    if not use_fba and peso_kg > 0:
+        shipping = get_amazon_fbm_shipping(peso_kg, largo_cm, ancho_cm, profundidad_cm)
+    else:
+        shipping = shipping_cost
+    
+    total_cost = cost + ad_cost + shipping
+    
+    fees = calculate_amazon_fees(price_discounted, category_name, fba, 0, plan_professional)
     total_fees = fees["total_fees"]
     
     profit = price_discounted - total_cost - total_fees
@@ -369,6 +703,8 @@ def calculate_amazon_from_fixed_base(cost, base_price, discount_pct, category_na
         "discount_amount": round(base_price - price_discounted, 2),
         "product_cost": cost,
         "ad_cost": round(ad_cost, 2),
+        "shipping_cost": round(shipping, 2),
+        "fba_cost": round(fba, 2),
         "total_cost": round(total_cost, 2),
         "fees": fees,
         "profit": round(profit, 2),
@@ -501,10 +837,11 @@ with st.sidebar:
         index=0
     )
     ml_shipping_cost = st.number_input(
-        "Costo de envío promedio (MXN)",
-        value=80.0,
+        "Costo de envío promedio (MXN) — solo si no usas pesos/medidas",
+        value=0.0,
         min_value=0.0,
-        step=10.0
+        step=10.0,
+        help="Dejar en 0 para calcular automáticamente por peso y medidas"
     ) if ml_shipping == "Gratis (vendedor paga)" else 0
     
     st.markdown("---")
@@ -518,19 +855,73 @@ with st.sidebar:
     
     use_fba = st.checkbox("Usar Amazon FBA", value=False)
     fba_cost_per_unit = st.number_input(
-        "Costo FBA por unidad (MXN)",
+        "Costo FBA por unidad (MXN) — solo si no usas pesos/medidas",
         value=0.0,
         min_value=0.0,
         step=5.0,
-        disabled=not use_fba
+        disabled=not use_fba,
+        help="Dejar en 0 para calcular automáticamente por peso y medidas"
     )
     amazon_shipping = st.number_input(
-        "Costo de envío FBM por unidad (MXN)",
-        value=40.0,
+        "Costo de envío FBM por unidad (MXN) — solo si no usas pesos/medidas",
+        value=0.0,
         min_value=0.0,
         step=10.0,
-        disabled=use_fba
+        disabled=use_fba,
+        help="Dejar en 0 para calcular automáticamente por peso y medidas"
     )
+    
+    st.markdown("---")
+    st.markdown("#### 📏 Pesos y Medidas (Google Sheets)")
+    
+    # Cargar datos de pesos y medidas
+    pesos_medidas_data, pesos_medidas_error = fetch_pesos_medidas()
+    
+    selected_product = None
+    product_dimensions = None
+    
+    if pesos_medidas_data:
+        st.success(f"✅ {len(pesos_medidas_data)} productos cargados")
+        
+        # Crear lista de productos para selección
+        product_options = []
+        product_map = {}
+        for record in pesos_medidas_data:
+            sku = str(record.get('SKU', '')).strip()
+            modelo = str(record.get('Modelo', '')).strip()
+            titulo = str(record.get('Titutlo', '')).strip()
+            
+            if sku or modelo:
+                display = f"{sku} — {modelo}" if sku and modelo else (sku or modelo)
+                if titulo:
+                    display += f" ({titulo[:30]}...)" if len(titulo) > 30 else f" ({titulo})"
+                product_options.append(display)
+                product_map[display] = {'sku': sku, 'modelo': modelo}
+        
+        product_options = sorted(product_options)
+        product_options.insert(0, "— Seleccionar producto —")
+        
+        selected_display = st.selectbox(
+            "Seleccionar producto",
+            product_options,
+            index=0
+        )
+        
+        if selected_display != "— Seleccionar producto —":
+            selected_product = product_map[selected_display]
+            product_dimensions = get_product_dimensions(
+                selected_product['sku'], 
+                selected_product['modelo'], 
+                pesos_medidas_data
+            )
+            
+            if product_dimensions:
+                st.markdown("<div class='success-box'>📏 Producto encontrado</div>", unsafe_allow_html=True)
+    else:
+        if pesos_medidas_error:
+            st.error(f"❌ Error: {pesos_medidas_error}")
+        else:
+            st.warning("⚠️ No se pudieron cargar datos de pesos y medidas")
     
     st.markdown("---")
     st.markdown("<div style='font-size: 0.8rem; color: #999;'>Comisiones actualizadas: Junio 2026<br>Fuente: SAT / ML / Amazon</div>", unsafe_allow_html=True)
@@ -568,7 +959,33 @@ with tab1:
     
     with col1:
         st.markdown("#### 📦 Producto")
-        product_name = st.text_input("Nombre del producto", "Ej: Audífonos Bluetooth NEBRO WE017")
+        
+        # Si hay producto seleccionado, mostrar sus datos
+        if product_dimensions:
+            st.markdown(f"""
+            <div class="success-box">
+                <b>📏 Producto seleccionado:</b> {product_dimensions['modelo'] or product_dimensions['sku']}<br>
+                <b>SKU:</b> {product_dimensions['sku']}<br>
+                <b>Peso:</b> {product_dimensions['peso_kg']:.2f} kg<br>
+                <b>Dimensiones:</b> {product_dimensions['largo_cm']:.1f} × {product_dimensions['ancho_cm']:.1f} × {product_dimensions['profundidad_cm']:.1f} cm<br>
+                <b>Peso Volumétrico:</b> {product_dimensions['peso_volumetrico']:.2f} kg<br>
+                <b>Peso Facturable:</b> {get_billable_weight(product_dimensions['peso_kg'], product_dimensions['largo_cm'], product_dimensions['ancho_cm'], product_dimensions['profundidad_cm']):.2f} kg
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Mostrar datos de caja si existen
+            if product_dimensions['peso_caja_kg'] > 0:
+                st.markdown(f"""
+                <div class="warning-box">
+                    <b>📦 Caja:</b> {product_dimensions['largo_caja_cm']:.1f} × {product_dimensions['ancho_caja_cm']:.1f} × {product_dimensions['profundidad_caja_cm']:.1f} cm<br>
+                    <b>Peso caja:</b> {product_dimensions['peso_caja_kg']:.2f} kg
+                </div>
+                """, unsafe_allow_html=True)
+            
+            product_name = st.text_input("Nombre del producto", value=product_dimensions['titulo'] or product_dimensions['modelo'] or "Ej: Audífonos Bluetooth NEBRO WE017")
+        else:
+            product_name = st.text_input("Nombre del producto", "Ej: Audífonos Bluetooth NEBRO WE017")
+        
         cost = st.number_input(
             "💵 Costo del producto (MXN)",
             value=150.0,
@@ -577,6 +994,20 @@ with tab1:
         )
         
         st.markdown("<div class='warning-box'>📌 El margen objetivo está fijado en <b>5% de ganancia</b> con <b>60% OFF</b>. Este es el precio tope.</div>", unsafe_allow_html=True)
+        
+        # Mostrar inputs de peso y medidas manuales (si no hay producto seleccionado)
+        if not product_dimensions:
+            st.markdown("---")
+            st.markdown("#### 📏 Pesos y Medidas Manual")
+            peso_manual = st.number_input("Peso (kg)", value=0.0, min_value=0.0, step=0.1)
+            largo_manual = st.number_input("Largo (cm)", value=0.0, min_value=0.0, step=0.5)
+            ancho_manual = st.number_input("Ancho (cm)", value=0.0, min_value=0.0, step=0.5)
+            profundidad_manual = st.number_input("Profundidad/Alto (cm)", value=0.0, min_value=0.0, step=0.5)
+        else:
+            peso_manual = 0
+            largo_manual = 0
+            ancho_manual = 0
+            profundidad_manual = 0
     
     with col2:
         st.markdown("#### 📋 Categorías")
@@ -591,6 +1022,63 @@ with tab1:
             key="az_cat_manual"
         )
     
+    # Determinar peso y dimensiones a usar
+    if product_dimensions:
+        peso_kg = product_dimensions['peso_kg']
+        largo_cm = product_dimensions['largo_cm']
+        ancho_cm = product_dimensions['ancho_cm']
+        profundidad_cm = product_dimensions['profundidad_cm']
+        
+        # Usar dimensiones de caja si existen (para envío)
+        if product_dimensions['peso_caja_kg'] > 0:
+            peso_kg = product_dimensions['peso_caja_kg']
+            largo_cm = product_dimensions['largo_caja_cm'] if product_dimensions['largo_caja_cm'] > 0 else largo_cm
+            ancho_cm = product_dimensions['ancho_caja_cm'] if product_dimensions['ancho_caja_cm'] > 0 else ancho_cm
+            profundidad_cm = product_dimensions['profundidad_caja_cm'] if product_dimensions['profundidad_caja_cm'] > 0 else profundidad_cm
+    else:
+        peso_kg = peso_manual
+        largo_cm = largo_manual
+        ancho_cm = ancho_manual
+        profundidad_cm = profundidad_manual
+    
+    # Mostrar resumen de envío calculado
+    if peso_kg > 0 and largo_cm > 0 and ancho_cm > 0 and profundidad_cm > 0:
+        billable_weight = get_billable_weight(peso_kg, largo_cm, ancho_cm, profundidad_cm)
+        
+        st.markdown("---")
+        st.markdown("#### 📦 Costo de Envío Calculado")
+        
+        env_col1, env_col2 = st.columns(2)
+        with env_col1:
+            # Preview de costo ML (usando precio estimado de $200)
+            ml_preview = get_ml_shipping_cost(200, peso_kg, largo_cm, ancho_cm, profundidad_cm)
+            st.markdown(f"""
+            <div class="fee-breakdown">
+                <b>🟡 Mercado Libre (est. $200):</b> ${ml_preview:.2f} MXN<br>
+                <b>Peso facturable:</b> {billable_weight:.2f} kg<br>
+                <b>Peso volumétrico:</b> {calculate_volumetric_weight(largo_cm, ancho_cm, profundidad_cm):.2f} kg
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with env_col2:
+            if use_fba:
+                fba_preview = get_amazon_fba_fee(peso_kg, largo_cm, ancho_cm, profundidad_cm)
+                st.markdown(f"""
+                <div class="fee-breakdown">
+                    <b>🟠 Amazon FBA:</b> ${fba_preview:.2f} MXN<br>
+                    <b>Peso facturable:</b> {billable_weight:.2f} kg<br>
+                    <b>Tier:</b> {get_amazon_size_tier(largo_cm, ancho_cm, profundidad_cm, peso_kg)}
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                fbm_preview = get_amazon_fbm_shipping(peso_kg, largo_cm, ancho_cm, profundidad_cm)
+                st.markdown(f"""
+                <div class="fee-breakdown">
+                    <b>🟠 Amazon FBM:</b> ${fbm_preview:.2f} MXN<br>
+                    <b>Peso facturable:</b> {billable_weight:.2f} kg
+                </div>
+                """, unsafe_allow_html=True)
+    
     st.markdown("---")
     
     # ========== MERCADO LIBRE ==========
@@ -598,7 +1086,7 @@ with tab1:
     
     # Calcular precio base tope para 5% ganancia con 60% OFF
     ml_base_price, ml_discounted_60 = calculate_ml_base_price(
-        cost, 0.05, 0.60, ml_category, ml_listing_type, has_rfc, ml_shipping_cost
+        cost, 0.05, 0.60, ml_category, ml_listing_type, has_rfc, ml_shipping_cost, 0.10, peso_kg, largo_cm, ancho_cm, profundidad_cm
     )
     
     # Simular ganancias desde ese precio base fijo con diferentes descuentos
@@ -607,7 +1095,7 @@ with tab1:
     
     for d in ml_discount_levels:
         scenario = calculate_ml_from_fixed_base(
-            cost, ml_base_price, d, ml_category, ml_listing_type, has_rfc, ml_shipping_cost
+            cost, ml_base_price, d, ml_category, ml_listing_type, has_rfc, ml_shipping_cost, 0.10, peso_kg, largo_cm, ancho_cm, profundidad_cm
         )
         ml_scenarios.append(scenario)
     
@@ -722,8 +1210,8 @@ with tab1:
             <div class="fee-breakdown">
                 <b>IVA retenido ({iva_label}):</b> ${s['fees']['iva_ret']:,.2f}<br>
                 <b>ISR retenido ({isr_label}):</b> ${s['fees']['isr_ret']:,.2f}<br>
-                <b>Envío:</b> ${ml_shipping_cost:,.2f}<br>
-                <b><b>Total comisiones ML:</b></b> ${s['fees']['total_fees']:,.2f} + Envío ${ml_shipping_cost:,.2f}
+                <b>Envío (por peso):</b> ${s['shipping_cost']:,.2f}<br>
+                <b><b>Total comisiones ML:</b></b> ${s['fees']['total_fees']:,.2f} + Envío ${s['shipping_cost']:,.2f}
             </div>
             """, unsafe_allow_html=True)
         
@@ -731,8 +1219,8 @@ with tab1:
         st.markdown(f"""
         <div class="fee-breakdown">
             <b>Precio con descuento:</b> ${s['discounted_price']:,.2f}<br>
-            <b>− Costo total (producto + publicidad):</b> ${s['total_cost']:,.2f}<br>
-            <b>− Comisiones ML + Envío:</b> ${s['fees']['total_fees'] + ml_shipping_cost:,.2f}<br>
+            <b>− Costo total (producto + publicidad + envío):</b> ${s['total_cost']:,.2f}<br>
+            <b>− Comisiones ML + Envío:</b> ${s['fees']['total_fees'] + s['shipping_cost']:,.2f}<br>
             <b>= Ganancia neta:</b> ${s['profit']:,.2f} ({s['margin']:.1f}% margen)
         </div>
         """, unsafe_allow_html=True)
@@ -747,14 +1235,14 @@ with tab1:
     
     # Calcular precio base tope para 5% ganancia con 60% OFF
     az_base_price, az_discounted_60 = calculate_amazon_base_price(
-        cost, 0.05, 0.60, az_category, az_fba, az_ship, plan_professional
+        cost, 0.05, 0.60, az_category, az_fba, az_ship, plan_professional, 0.10, peso_kg, largo_cm, ancho_cm, profundidad_cm, use_fba
     )
     
     # Simular ganancias desde ese precio base fijo
     az_scenarios = []
     for d in [0.60, 0.50, 0.40, 0.30]:
         scenario = calculate_amazon_from_fixed_base(
-            cost, az_base_price, d, az_category, az_fba, az_ship, plan_professional
+            cost, az_base_price, d, az_category, az_fba, az_ship, plan_professional, 0.10, peso_kg, largo_cm, ancho_cm, profundidad_cm, use_fba
         )
         az_scenarios.append(scenario)
     
@@ -862,8 +1350,8 @@ with tab1:
         with fee_col2:
             st.markdown(f"""
             <div class="fee-breakdown">
-                <b>FBA:</b> ${s['fees']['fba']:,.2f}<br>
-                <b>Envío:</b> ${s['fees']['shipping']:,.2f}<br>
+                <b>FBA (calculado por peso):</b> ${s['fba_cost']:,.2f}<br>
+                <b>Envío (calculado por peso):</b> ${s['shipping_cost']:,.2f}<br>
                 <b>Total comisiones Amazon:</b> ${s['fees']['total_fees']:,.2f} ({(s['fees']['total_fees']/s['discounted_price'])*100:.1f}%)
             </div>
             """, unsafe_allow_html=True)
@@ -872,8 +1360,8 @@ with tab1:
         st.markdown(f"""
         <div class="fee-breakdown">
             <b>Precio con descuento:</b> ${s['discounted_price']:,.2f}<br>
-            <b>− Costo total (producto + publicidad):</b> ${s['total_cost']:,.2f}<br>
-            <b>− Comisiones Amazon + Envío:</b> ${s['fees']['total_fees'] + s['fees']['shipping']:,.2f}<br>
+            <b>− Costo total (producto + publicidad + envío):</b> ${s['total_cost']:,.2f}<br>
+            <b>− Comisiones Amazon + Envío:</b> ${s['fees']['total_fees'] + s['shipping_cost']:,.2f}<br>
             <b>= Ganancia neta:</b> ${s['profit']:,.2f} ({s['margin']:.1f}% margen)
         </div>
         """, unsafe_allow_html=True)
@@ -896,23 +1384,29 @@ with tab2:
     with comp_col3:
         comp_az_cat = st.selectbox("Categoría Amazon", list(AMAZON_CATEGORIES.keys()), key="comp_az_cat")
     
+    # Usar peso y dimensiones del producto seleccionado o manuales
+    comp_peso_kg = peso_kg
+    comp_largo_cm = largo_cm
+    comp_ancho_cm = ancho_cm
+    comp_profundidad_cm = profundidad_cm
+    
     comp_az_fba = fba_cost_per_unit if use_fba else 0
     comp_az_ship = 0 if use_fba else amazon_shipping
     
     # Calcular precios base tope para ambos
     comp_ml_base, comp_ml_60 = calculate_ml_base_price(
-        comp_cost, 0.05, 0.60, comp_ml_cat, ml_listing_type, has_rfc, ml_shipping_cost
+        comp_cost, 0.05, 0.60, comp_ml_cat, ml_listing_type, has_rfc, ml_shipping_cost, 0.10, comp_peso_kg, comp_largo_cm, comp_ancho_cm, comp_profundidad_cm
     )
     comp_az_base, comp_az_60 = calculate_amazon_base_price(
-        comp_cost, 0.05, 0.60, comp_az_cat, comp_az_fba, comp_az_ship, plan_professional
+        comp_cost, 0.05, 0.60, comp_az_cat, comp_az_fba, comp_az_ship, plan_professional, 0.10, comp_peso_kg, comp_largo_cm, comp_ancho_cm, comp_profundidad_cm, use_fba
     )
     
     # Simular todos los descuentos
     comp_ml_scenarios = []
     comp_az_scenarios = []
     for d in [0.60, 0.50, 0.40, 0.30]:
-        comp_ml_scenarios.append(calculate_ml_from_fixed_base(comp_cost, comp_ml_base, d, comp_ml_cat, ml_listing_type, has_rfc, ml_shipping_cost))
-        comp_az_scenarios.append(calculate_amazon_from_fixed_base(comp_cost, comp_az_base, d, comp_az_cat, comp_az_fba, comp_az_ship, plan_professional))
+        comp_ml_scenarios.append(calculate_ml_from_fixed_base(comp_cost, comp_ml_base, d, comp_ml_cat, ml_listing_type, has_rfc, ml_shipping_cost, 0.10, comp_peso_kg, comp_largo_cm, comp_ancho_cm, comp_profundidad_cm))
+        comp_az_scenarios.append(calculate_amazon_from_fixed_base(comp_cost, comp_az_base, d, comp_az_cat, comp_az_fba, comp_az_ship, plan_professional, 0.10, comp_peso_kg, comp_largo_cm, comp_ancho_cm, comp_profundidad_cm, use_fba))
     
     st.markdown("---")
     
@@ -1021,33 +1515,56 @@ with tab3:
                             sku = row["SKU"]
                             titulo = row["Título"]
                             
+                            # Buscar pesos y medidas por SKU
+                            prod_dims = get_product_dimensions(sku, None, pesos_medidas_data) if pesos_medidas_data else None
+                            
+                            if prod_dims:
+                                p_kg = prod_dims['peso_kg']
+                                l_cm = prod_dims['largo_cm']
+                                a_cm = prod_dims['ancho_cm']
+                                pr_cm = prod_dims['profundidad_cm']
+                                
+                                # Usar dimensiones de caja si existen
+                                if prod_dims['peso_caja_kg'] > 0:
+                                    p_kg = prod_dims['peso_caja_kg']
+                                    l_cm = prod_dims['largo_caja_cm'] if prod_dims['largo_caja_cm'] > 0 else l_cm
+                                    a_cm = prod_dims['ancho_caja_cm'] if prod_dims['ancho_caja_cm'] > 0 else a_cm
+                                    pr_cm = prod_dims['profundidad_caja_cm'] if prod_dims['profundidad_caja_cm'] > 0 else pr_cm
+                            else:
+                                p_kg = 0
+                                l_cm = 0
+                                a_cm = 0
+                                pr_cm = 0
+                            
                             # ML - Precio base tope para 5% con 60% OFF
                             ml_base, _ = calculate_ml_base_price(
-                                costo, 0.05, 0.60, bulk_ml_cat, ml_listing_type, has_rfc, ml_shipping_cost
+                                costo, 0.05, 0.60, bulk_ml_cat, ml_listing_type, has_rfc, ml_shipping_cost, 0.10, p_kg, l_cm, a_cm, pr_cm
                             )
                             
                             # Simular descuentos desde ese precio base
-                            ml_60 = calculate_ml_from_fixed_base(costo, ml_base, 0.60, bulk_ml_cat, ml_listing_type, has_rfc, ml_shipping_cost)
-                            ml_50 = calculate_ml_from_fixed_base(costo, ml_base, 0.50, bulk_ml_cat, ml_listing_type, has_rfc, ml_shipping_cost)
-                            ml_40 = calculate_ml_from_fixed_base(costo, ml_base, 0.40, bulk_ml_cat, ml_listing_type, has_rfc, ml_shipping_cost)
-                            ml_30 = calculate_ml_from_fixed_base(costo, ml_base, 0.30, bulk_ml_cat, ml_listing_type, has_rfc, ml_shipping_cost)
+                            ml_60 = calculate_ml_from_fixed_base(costo, ml_base, 0.60, bulk_ml_cat, ml_listing_type, has_rfc, ml_shipping_cost, 0.10, p_kg, l_cm, a_cm, pr_cm)
+                            ml_50 = calculate_ml_from_fixed_base(costo, ml_base, 0.50, bulk_ml_cat, ml_listing_type, has_rfc, ml_shipping_cost, 0.10, p_kg, l_cm, a_cm, pr_cm)
+                            ml_40 = calculate_ml_from_fixed_base(costo, ml_base, 0.40, bulk_ml_cat, ml_listing_type, has_rfc, ml_shipping_cost, 0.10, p_kg, l_cm, a_cm, pr_cm)
+                            ml_30 = calculate_ml_from_fixed_base(costo, ml_base, 0.30, bulk_ml_cat, ml_listing_type, has_rfc, ml_shipping_cost, 0.10, p_kg, l_cm, a_cm, pr_cm)
                             
                             # Amazon - Precio base tope para 5% con 60% OFF
                             az_fba = fba_cost_per_unit if use_fba else 0
                             az_ship = 0 if use_fba else amazon_shipping
                             az_base, _ = calculate_amazon_base_price(
-                                costo, 0.05, 0.60, bulk_az_cat, az_fba, az_ship, plan_professional
+                                costo, 0.05, 0.60, bulk_az_cat, az_fba, az_ship, plan_professional, 0.10, p_kg, l_cm, a_cm, pr_cm, use_fba
                             )
                             
-                            az_60 = calculate_amazon_from_fixed_base(costo, az_base, 0.60, bulk_az_cat, az_fba, az_ship, plan_professional)
-                            az_50 = calculate_amazon_from_fixed_base(costo, az_base, 0.50, bulk_az_cat, az_fba, az_ship, plan_professional)
-                            az_40 = calculate_amazon_from_fixed_base(costo, az_base, 0.40, bulk_az_cat, az_fba, az_ship, plan_professional)
-                            az_30 = calculate_amazon_from_fixed_base(costo, az_base, 0.30, bulk_az_cat, az_fba, az_ship, plan_professional)
+                            az_60 = calculate_amazon_from_fixed_base(costo, az_base, 0.60, bulk_az_cat, az_fba, az_ship, plan_professional, 0.10, p_kg, l_cm, a_cm, pr_cm, use_fba)
+                            az_50 = calculate_amazon_from_fixed_base(costo, az_base, 0.50, bulk_az_cat, az_fba, az_ship, plan_professional, 0.10, p_kg, l_cm, a_cm, pr_cm, use_fba)
+                            az_40 = calculate_amazon_from_fixed_base(costo, az_base, 0.40, bulk_az_cat, az_fba, az_ship, plan_professional, 0.10, p_kg, l_cm, a_cm, pr_cm, use_fba)
+                            az_30 = calculate_amazon_from_fixed_base(costo, az_base, 0.30, bulk_az_cat, az_fba, az_ship, plan_professional, 0.10, p_kg, l_cm, a_cm, pr_cm, use_fba)
                             
                             result_row = {
                                 "SKU": sku,
                                 "Producto": titulo,
                                 "Costo": costo,
+                                "Peso kg": round(p_kg, 2) if p_kg > 0 else "—",
+                                "Dimensiones": f"{l_cm:.1f}×{a_cm:.1f}×{pr_cm:.1f}" if all([l_cm, a_cm, pr_cm]) else "—",
                                 "ML Base Tope": round(ml_base, 2),
                                 "ML 60% OFF": round(ml_60['discounted_price'], 2),
                                 "ML 60% Ganancia": round(ml_60['profit'], 2),
