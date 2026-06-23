@@ -240,31 +240,46 @@ def calculate_ml_fees(price, category_name, listing_type="classic", has_rfc=True
         "net_received": price - total_fees,
     }
 
-def calculate_ml_base_price(cost, target_margin, discount_pct, category_name, listing_type="classic", has_rfc=True, shipping_cost=0):
-    """Calcula el precio BASE necesario para que el precio con descuento mantenga el margen deseado."""
-    # Iteración: las comisiones dependen del precio con descuento
-    price_discounted = cost * 2  # Estimación inicial
+def calculate_ml_base_price(cost, target_margin, discount_pct, category_name, listing_type="classic", has_rfc=True, shipping_cost=0, ad_cost_pct=0.10):
+    """Calcula el precio BASE necesario para que el precio con descuento mantenga el margen deseado.
+    Incluye costo de publicidad como % del precio de venta."""
     
-    for _ in range(20):
+    # Iteración: publicidad depende del precio con descuento, que depende del costo total...
+    price_discounted = cost * 2.5  # Estimación inicial
+    
+    for _ in range(30):
+        # Costo de publicidad = % del precio con descuento
+        ad_cost = price_discounted * ad_cost_pct
+        total_cost = cost + ad_cost
+        
         fees = calculate_ml_fees(price_discounted, category_name, listing_type, has_rfc)
         total_fees = fees["total_fees"] + shipping_cost
-        # price_discounted - cost - total_fees = target_margin * price_discounted
-        # price_discounted * (1 - target_margin) = cost + total_fees
-        price_discounted = (cost + total_fees) / (1 - target_margin)
+        
+        # price_discounted - total_cost - total_fees = target_margin * price_discounted
+        # price_discounted * (1 - target_margin) = total_cost + total_fees
+        new_price_discounted = (total_cost + total_fees) / (1 - target_margin)
+        
+        if abs(new_price_discounted - price_discounted) < 0.01:
+            break
+        price_discounted = new_price_discounted
     
     # Precio base = Precio con descuento / (1 - discount)
     price_base = price_discounted / (1 - discount_pct)
     
     return round(price_base, 2), round(price_discounted, 2)
 
-def calculate_ml_from_fixed_base(cost, base_price, discount_pct, category_name, listing_type="classic", has_rfc=True, shipping_cost=0):
-    """Desde un precio base FIJO, calcula ganancia con un % de descuento dado."""
+def calculate_ml_from_fixed_base(cost, base_price, discount_pct, category_name, listing_type="classic", has_rfc=True, shipping_cost=0, ad_cost_pct=0.10):
+    """Desde un precio base FIJO, calcula ganancia con un % de descuento dado. Incluye publicidad."""
     price_discounted = base_price * (1 - discount_pct)
+    
+    # Costo de publicidad = % del precio con descuento
+    ad_cost = price_discounted * ad_cost_pct
+    total_cost = cost + ad_cost
     
     fees = calculate_ml_fees(price_discounted, category_name, listing_type, has_rfc)
     total_fees = fees["total_fees"] + shipping_cost
     
-    profit = price_discounted - cost - total_fees
+    profit = price_discounted - total_cost - total_fees
     margin = (profit / price_discounted) * 100 if price_discounted > 0 else 0
     roi = (profit / cost) * 100 if cost > 0 else 0
     
@@ -273,11 +288,13 @@ def calculate_ml_from_fixed_base(cost, base_price, discount_pct, category_name, 
         "base_price": base_price,
         "discounted_price": round(price_discounted, 2),
         "discount_amount": round(base_price - price_discounted, 2),
+        "product_cost": cost,
+        "ad_cost": round(ad_cost, 2),
+        "total_cost": round(total_cost, 2),
         "fees": fees,
         "profit": round(profit, 2),
         "margin": round(margin, 2),
         "roi": round(roi, 2),
-        "total_cost": cost + shipping_cost,
     }
 
 # ============================================================
@@ -309,27 +326,39 @@ def calculate_amazon_fees(price, category_name, fba_fee=0, shipping_cost=0, plan
         "net_received": price - total_fees,
     }
 
-def calculate_amazon_base_price(cost, target_margin, discount_pct, category_name, fba_fee=0, shipping_cost=0, plan_professional=True):
-    """Calcula el precio BASE necesario para que el precio con descuento mantenga el margen deseado."""
-    price_discounted = cost * 2  # Estimación inicial
+def calculate_amazon_base_price(cost, target_margin, discount_pct, category_name, fba_fee=0, shipping_cost=0, plan_professional=True, ad_cost_pct=0.10):
+    """Calcula el precio BASE necesario para que el precio con descuento mantenga el margen deseado. Incluye publicidad."""
     
-    for _ in range(20):
+    price_discounted = cost * 2.5  # Estimación inicial
+    
+    for _ in range(30):
+        ad_cost = price_discounted * ad_cost_pct
+        total_cost = cost + ad_cost
+        
         fees = calculate_amazon_fees(price_discounted, category_name, fba_fee, shipping_cost, plan_professional)
         total_fees = fees["total_fees"]
-        price_discounted = (cost + total_fees) / (1 - target_margin)
+        
+        new_price_discounted = (total_cost + total_fees) / (1 - target_margin)
+        
+        if abs(new_price_discounted - price_discounted) < 0.01:
+            break
+        price_discounted = new_price_discounted
     
     price_base = price_discounted / (1 - discount_pct)
     
     return round(price_base, 2), round(price_discounted, 2)
 
-def calculate_amazon_from_fixed_base(cost, base_price, discount_pct, category_name, fba_fee=0, shipping_cost=0, plan_professional=True):
-    """Desde un precio base FIJO, calcula ganancia con un % de descuento dado."""
+def calculate_amazon_from_fixed_base(cost, base_price, discount_pct, category_name, fba_fee=0, shipping_cost=0, plan_professional=True, ad_cost_pct=0.10):
+    """Desde un precio base FIJO, calcula ganancia con un % de descuento dado. Incluye publicidad."""
     price_discounted = base_price * (1 - discount_pct)
+    
+    ad_cost = price_discounted * ad_cost_pct
+    total_cost = cost + ad_cost
     
     fees = calculate_amazon_fees(price_discounted, category_name, fba_fee, shipping_cost, plan_professional)
     total_fees = fees["total_fees"]
     
-    profit = price_discounted - cost - total_fees
+    profit = price_discounted - total_cost - total_fees
     margin = (profit / price_discounted) * 100 if price_discounted > 0 else 0
     roi = (profit / cost) * 100 if cost > 0 else 0
     
@@ -338,11 +367,13 @@ def calculate_amazon_from_fixed_base(cost, base_price, discount_pct, category_na
         "base_price": base_price,
         "discounted_price": round(price_discounted, 2),
         "discount_amount": round(base_price - price_discounted, 2),
+        "product_cost": cost,
+        "ad_cost": round(ad_cost, 2),
+        "total_cost": round(total_cost, 2),
         "fees": fees,
         "profit": round(profit, 2),
         "margin": round(margin, 2),
         "roi": round(roi, 2),
-        "total_cost": cost + (shipping_cost if not fba_fee else 0),
     }
 
 # ============================================================
@@ -508,11 +539,12 @@ with st.sidebar:
 # HEADER PRINCIPAL
 # ============================================================
 st.markdown('<div class="main-header">💰 Marketplace Pricing Calculator México 2026</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">Precio base tope con 5% ganancia al 60% OFF — Simula ganancias con 60%, 50%, 40%, 30% descuento</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">Precio base tope con 5% ganancia al 60% OFF (incluye 10% publicidad) — Simula ganancias con 60%, 50%, 40%, 30% descuento</div>', unsafe_allow_html=True)
 
 st.markdown("""
 <div class="success-box">
     <b>💡 Cómo funciona:</b> La app calcula el <b>precio base tope</b> para que con <b>60% de descuento</b> obtengas <b>5% de ganancia</b>. 
+    Incluye automáticamente un <b>10% de costo de publicidad</b> sobre el precio de venta. 
     Ese precio base es fijo. Luego simula cuánto ganarías si aplicas <b>60%, 50%, 40% o 30%</b> de descuento sobre ese mismo precio base.
 </div>
 """, unsafe_allow_html=True)
@@ -645,6 +677,7 @@ with tab1:
             
             st.markdown(f"### {s['discount_pct']:.0f}% OFF")
             st.markdown(f"**Precio final:** ${s['discounted_price']:,.2f}")
+            st.markdown(f"**Publicidad (10%):** ${s['ad_cost']:,.2f}")
             st.markdown(f"**Ganancia:** ${s['profit']:,.2f}")
             st.markdown(f"**Margen:** {s['margin']:.1f}%")
             
@@ -740,7 +773,8 @@ with tab1:
             "Descuento": f"{s['discount_pct']:.0f}%",
             "Precio Base (Fijo)": f"${s['base_price']:,.2f}",
             "Precio con Descuento": f"${s['discounted_price']:,.2f}",
-            "Monto Descuento": f"${s['discount_amount']:,.2f}",
+            "Costo Producto": f"${s['product_cost']:,.2f}",
+            "Publicidad (10%)": f"${s['ad_cost']:,.2f}",
             "Comisiones Amazon": f"${s['fees']['total_fees']:,.2f}",
             "Ganancia Neta": f"${s['profit']:,.2f}",
             "Margen Real": f"{s['margin']:.1f}%",
@@ -767,6 +801,7 @@ with tab1:
             
             st.markdown(f"### {s['discount_pct']:.0f}% OFF")
             st.markdown(f"**Precio final:** ${s['discounted_price']:,.2f}")
+            st.markdown(f"**Publicidad (10%):** ${s['ad_cost']:,.2f}")
             st.markdown(f"**Ganancia:** ${s['profit']:,.2f}")
             st.markdown(f"**Margen:** {s['margin']:.1f}%")
             
@@ -1040,7 +1075,7 @@ with tab3:
 st.markdown("---")
 st.markdown(
     f"<div style='text-align: center; color: #999; font-size: 0.8rem;'>"
-    f"Marketplace Pricing Calculator México 2026 • Precio base tope = 5% ganancia con 60% OFF • Comisiones actualizadas: Junio 2026"
+    f"Marketplace Pricing Calculator México 2026 • Precio base tope = 5% ganancia con 60% OFF + 10% publicidad • Comisiones actualizadas: Junio 2026"
     f"</div>",
     unsafe_allow_html=True
 )
