@@ -1183,6 +1183,7 @@ with tab1:
     # Fee breakdown
     with st.expander("📋 Desglose completo de costos (al precio con descuento)"):
         s = ml_scenarios[0]  # 60% OFF
+        ad_cost_pct = 0.10
         
         st.markdown("#### 💰 Costos del Producto")
         st.markdown(f"""
@@ -1327,6 +1328,7 @@ with tab1:
     
     with st.expander("📋 Desglose completo de costos (al precio con descuento)"):
         s = az_scenarios[0]
+        ad_cost_pct = 0.10
         
         st.markdown("#### 💰 Costos del Producto")
         st.markdown(f"""
