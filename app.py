@@ -929,9 +929,105 @@ def fetch_shopify_products():
 # SIDEBAR — CONFIGURACIÓN GLOBAL
 # ============================================================
 with st.sidebar:
-    st.markdown("### ⚙️ Configuración México 2026")
+    st.markdown("### 🛒 Producto desde Shopify")
+    st.markdown("Selecciona un producto para cargar peso, dimensiones y costo automáticamente.")
+    
+    # Cargar productos desde Shopify
+    @st.cache_data(ttl=300)
+    def _fetch_shopify_cached():
+        return fetch_shopify_products()
+    
+    shopify_products = _fetch_shopify_cached()
+    
+    selected_shopify_product = None
+    product_dimensions = None
+    
+    if shopify_products:
+        # Only show products with SKU + title, sorted
+        products_with_sku = [p for p in shopify_products if p.get("SKU") and p.get("SKU") != "Sin SKU"]
+        products_sorted = sorted(products_with_sku, key=lambda x: x.get("Título", "").lower())
+        
+        # Search box for filtering
+        search_term = st.text_input("🔍 Buscar producto", "", key="shopify_search", 
+                                     placeholder="Escribe nombre o SKU...")
+        
+        # Filter products based on search
+        if search_term:
+            filtered = [p for p in products_sorted if search_term.lower() in p.get("Título", "").lower() or search_term.lower() in p.get("SKU", "").lower()]
+        else:
+            filtered = products_sorted
+        
+        if len(filtered) > 0:
+            # Create dropdown with limited options if too many
+            display_options = []
+            product_map = {}
+            for p in filtered[:200]:  # Limit to 200 for performance
+                display = f"{p.get('SKU', 'N/A')} | {p.get('Título', '')[:50]}"
+                display_options.append(display)
+                product_map[display] = p
+            
+            if len(filtered) > 200:
+                st.caption(f"Mostrando 200 de {len(filtered)} productos. Escribe para filtrar.")
+            else:
+                st.caption(f"{len(filtered)} productos encontrados")
+            
+            selected_display = st.selectbox(
+                "Seleccionar producto",
+                ["— Elige un producto —"] + display_options,
+                index=0,
+                key="shopify_select"
+            )
+            
+            if selected_display != "— Elige un producto —":
+                selected_shopify_product = product_map[selected_display]
+                
+                # Create product_dimensions from Shopify
+                product_dimensions = {
+                    'sku': selected_shopify_product.get('SKU', ''),
+                    'modelo': selected_shopify_product.get('Variante', ''),
+                    'titulo': selected_shopify_product.get('Título', ''),
+                    'peso_kg': selected_shopify_product.get('Peso kg', 0),
+                    'largo_cm': selected_shopify_product.get('Largo cm', 0),
+                    'ancho_cm': selected_shopify_product.get('Ancho cm', 0),
+                    'profundidad_cm': selected_shopify_product.get('Profundidad cm', 0),
+                    'peso_caja_kg': 0,
+                    'largo_caja_cm': 0,
+                    'ancho_caja_cm': 0,
+                    'profundidad_caja_cm': 0,
+                    'peso_volumetrico': calculate_volumetric_weight(
+                        selected_shopify_product.get('Largo cm', 0),
+                        selected_shopify_product.get('Ancho cm', 0),
+                        selected_shopify_product.get('Profundidad cm', 0)
+                    )
+                }
+                
+                # Show product card in sidebar
+                st.markdown("---")
+                st.markdown("#### 📏 Datos del producto")
+                st.markdown(f"""
+                <div style='background: #f0fdf4; padding: 12px; border-radius: 8px; border: 1px solid #86efac; font-size: 0.9rem;'>
+                    <b>{selected_shopify_product.get('Título', '')}</b><br>
+                    <span style='color: #666;'>SKU: {selected_shopify_product.get('SKU', '')}</span><br><br>
+                    <b>📦 Peso:</b> {product_dimensions['peso_kg']:.3f} kg<br>
+                    <b>📐 Dimensiones:</b> {product_dimensions['largo_cm']:.1f} × {product_dimensions['ancho_cm']:.1f} × {product_dimensions['profundidad_cm']:.1f} cm<br>
+                    <b>⚖️ Volumétrico:</b> {product_dimensions['peso_volumetrico']:.3f} kg<br>
+                    <b>💵 Costo:</b> ${selected_shopify_product.get('Costo', 0):,.2f} MXN
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # Warning if no dimensions
+                if product_dimensions['peso_kg'] == 0:
+                    st.warning("⚠️ Este producto no tiene peso configurado en Shopify. El envío no se calculará correctamente.")
+                if product_dimensions['largo_cm'] == 0 or product_dimensions['ancho_cm'] == 0 or product_dimensions['profundidad_cm'] == 0:
+                    st.warning("⚠️ Este producto no tiene dimensiones completas en Shopify. El envío puede ser impreciso.")
+        else:
+            st.warning("No se encontraron productos con ese término de búsqueda.")
+    else:
+        st.warning("⚠️ No se pudieron cargar productos de Shopify. Verifica el token en los secrets.")
     
     st.markdown("---")
+    st.markdown("### ⚙️ Configuración")
+    
     st.markdown("#### 🏢 Datos Fiscales")
     has_rfc = st.checkbox("Tengo RFC registrado en ML", value=True)
     if not has_rfc:
@@ -952,7 +1048,7 @@ with st.sidebar:
         index=0
     )
     ml_shipping_cost = st.number_input(
-        "Costo de envío promedio (MXN) — solo si no usas pesos/medidas",
+        "Costo de envío promedio (MXN) — solo si no hay peso",
         value=0.0,
         min_value=0.0,
         step=10.0,
@@ -970,7 +1066,7 @@ with st.sidebar:
     
     use_fba = st.checkbox("Usar Amazon FBA", value=False)
     fba_cost_per_unit = st.number_input(
-        "Costo FBA por unidad (MXN) — solo si no usas pesos/medidas",
+        "Costo FBA por unidad (MXN) — solo si no hay peso",
         value=0.0,
         min_value=0.0,
         step=5.0,
@@ -978,146 +1074,13 @@ with st.sidebar:
         help="Dejar en 0 para calcular automáticamente por peso y medidas"
     )
     amazon_shipping = st.number_input(
-        "Costo de envío FBM por unidad (MXN) — solo si no usas pesos/medidas",
+        "Costo de envío FBM por unidad (MXN) — solo si no hay peso",
         value=0.0,
         min_value=0.0,
         step=10.0,
         disabled=use_fba,
         help="Dejar en 0 para calcular automáticamente por peso y medidas"
     )
-    
-    st.markdown("---")
-    st.markdown("#### 📏 Pesos y Medidas")
-    
-    # Fuente de datos
-    pesos_source = st.radio(
-        "Fuente de datos",
-        ["Google Sheets", "Shopify"],
-        index=0,
-        key="pesos_source"
-    )
-    
-    selected_product = None
-    product_dimensions = None
-    
-    if pesos_source == "Google Sheets":
-        # Cargar datos de pesos y medidas desde Google Sheets
-        pesos_medidas_data, pesos_medidas_error = fetch_pesos_medidas()
-        
-        if pesos_medidas_data:
-            st.success(f"✅ {len(pesos_medidas_data)} productos cargados")
-            
-            # Crear lista de productos para selección
-            product_options = []
-            product_map = {}
-            for record in pesos_medidas_data:
-                sku = str(record.get('SKU', '')).strip()
-                modelo = str(record.get('Modelo', '')).strip()
-                titulo = str(record.get('Titutlo', '')).strip()
-                
-                if sku or modelo:
-                    display = f"{sku} — {modelo}" if sku and modelo else (sku or modelo)
-                    if titulo:
-                        display += f" ({titulo[:30]}...)" if len(titulo) > 30 else f" ({titulo})"
-                    product_options.append(display)
-                    product_map[display] = {'sku': sku, 'modelo': modelo}
-            
-            product_options = sorted(product_options)
-            product_options.insert(0, "— Seleccionar producto —")
-            
-            selected_display = st.selectbox(
-                "Seleccionar producto (Google Sheets)",
-                product_options,
-                index=0,
-                key="gsheets_select"
-            )
-            
-            if selected_display != "— Seleccionar producto —":
-                selected_product = product_map[selected_display]
-                product_dimensions = get_product_dimensions(
-                    selected_product['sku'], 
-                    selected_product['modelo'], 
-                    pesos_medidas_data
-                )
-                
-                if product_dimensions:
-                    st.markdown("<div class='success-box'>📏 Producto encontrado</div>", unsafe_allow_html=True)
-        else:
-            if pesos_medidas_error:
-                st.error(f"❌ Error: {pesos_medidas_error}")
-            else:
-                st.warning("⚠️ No se pudieron cargar datos de pesos y medidas")
-    
-    else:  # Shopify
-        st.markdown("**🛒 Productos desde Shopify**")
-        
-        # Cargar productos desde Shopify
-        shopify_products = fetch_shopify_products()
-        
-        if shopify_products:
-            # Filtrar solo productos con pesos y medidas o costos
-            products_with_data = [p for p in shopify_products if (p.get("Peso kg", 0) > 0) or (p.get("Costo") is not None)]
-            
-            st.success(f"✅ {len(products_with_data)} productos con datos")
-            
-            # Crear lista de productos para selección
-            product_options = []
-            product_map = {}
-            for p in products_with_data:
-                sku = p.get("SKU", "")
-                titulo = p.get("Título", "")
-                
-                if sku and sku != "Sin SKU":
-                    display = f"{sku} — {titulo[:40]}" if len(titulo) > 40 else f"{sku} — {titulo}"
-                    product_options.append(display)
-                    product_map[display] = p
-            
-            product_options = sorted(product_options)
-            product_options.insert(0, "— Seleccionar producto —")
-            
-            selected_display = st.selectbox(
-                "Seleccionar producto (Shopify)",
-                product_options,
-                index=0,
-                key="shopify_select"
-            )
-            
-            if selected_display != "— Seleccionar producto —":
-                selected_product = product_map[selected_display]
-                
-                # Crear product_dimensions desde Shopify
-                product_dimensions = {
-                    'sku': selected_product.get('SKU', ''),
-                    'modelo': selected_product.get('Variante', ''),
-                    'titulo': selected_product.get('Título', ''),
-                    'peso_kg': selected_product.get('Peso kg', 0),
-                    'largo_cm': selected_product.get('Largo cm', 0),
-                    'ancho_cm': selected_product.get('Ancho cm', 0),
-                    'profundidad_cm': selected_product.get('Profundidad cm', 0),
-                    'peso_caja_kg': 0,
-                    'largo_caja_cm': 0,
-                    'ancho_caja_cm': 0,
-                    'profundidad_caja_cm': 0,
-                    'peso_volumetrico': calculate_volumetric_weight(
-                        selected_product.get('Largo cm', 0),
-                        selected_product.get('Ancho cm', 0),
-                        selected_product.get('Profundidad cm', 0)
-                    )
-                }
-                
-                st.markdown("<div class='success-box'>📏 Producto encontrado</div>", unsafe_allow_html=True)
-                
-                # Mostrar datos del producto
-                st.markdown(f"""
-                <div style='font-size: 0.85rem; color: #666; margin-top: 0.5rem;'>
-                    <b>Peso:</b> {product_dimensions['peso_kg']:.3f} kg<br>
-                    <b>Dimensiones:</b> {product_dimensions['largo_cm']:.1f} × {product_dimensions['ancho_cm']:.1f} × {product_dimensions['profundidad_cm']:.1f} cm<br>
-                    <b>Peso Volumétrico:</b> {product_dimensions['peso_volumetrico']:.3f} kg<br>
-                    <b>Costo:</b> ${selected_product.get('Costo', 0):,.2f} MXN
-                </div>
-                """, unsafe_allow_html=True)
-        else:
-            st.warning("⚠️ No se pudieron cargar productos de Shopify. Verifica el token.")
     
     st.markdown("---")
     st.markdown("<div style='font-size: 0.8rem; color: #999;'>Comisiones actualizadas: Junio 2026<br>Fuente: SAT / ML / Amazon</div>", unsafe_allow_html=True)
