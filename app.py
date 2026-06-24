@@ -132,19 +132,27 @@ def get_ml_shipping_cost(price, peso_kg, largo, ancho, profundidad):
     """
     Calcula costo de envío de Mercado Libre México basado en peso y dimensiones.
     Desde abril 2026: productos < $299 usan tarifa variable por peso.
-    Productos >= $299: envío gratis (ML cubre parcialmente según reputación).
+    Productos >= $299: envío gratis, vendedor paga el costo completo del envío.
     """
-    if price >= 299:
-        # Envío gratis: ML cubre parte, vendedor paga el resto
-        # Aproximación: vendedor paga ~50% del costo real
-        billable_weight = get_billable_weight(peso_kg, largo, ancho, profundidad)
-        return calculate_ml_shipping_table(billable_weight, price) * 0.5
-    
     billable_weight = get_billable_weight(peso_kg, largo, ancho, profundidad)
+    
+    if price >= 299:
+        # Envío gratis: vendedor paga el costo completo del envío gratis
+        # Usar tabla de envío gratis (precios más altos)
+        return calculate_ml_shipping_table(billable_weight, 0)  # 0 = usar tabla free
+    
+    # Productos < $299: usar tabla por rango de precio
     return calculate_ml_shipping_table(billable_weight, price)
 
 def calculate_ml_shipping_table(peso_kg, price):
-    """Tabla de costos de envío ML México — Abril 2026"""
+    """Tabla de costos de envío ML México — Abril 2026
+    
+    Fuente: https://www.profitosapp.com/blog/cambios-mercado-envios-full-mexico-abril-2026
+    Verificado 7 de abril de 2026 en mercadolibre.com.mx
+    
+    Productos < $299: costo variable por peso (ya no es fijo)
+    Productos >= $299: envío gratis, vendedor paga el costo completo del envío
+    """
     
     # Determinar rango de precio
     if price < 99:
@@ -156,28 +164,78 @@ def calculate_ml_shipping_table(peso_kg, price):
     else:
         price_range = "free"
     
-    # Tabla de costos por peso (MXN)
-    # Fuente: Mercado Libre México — Abril 2026
+    # Tabla de costos por peso (MXN) — desde 6 de abril 2026
+    # Productos menores a $299: costo variable por peso
     shipping_table = {
         "low": {   # $0 - $98.99
-            0.3: 25, 0.5: 28.50, 1.0: 33, 2.0: 35, 3.0: 37, 4.0: 39,
-            5.0: 40, 7.0: 45, 9.0: 51, 12.0: 59, 15.0: 69, 20.0: 81,
-            30.0: 102, 40.0: 126, 50.0: 163, 60.0: 183
+            0.3: 25,      # Hasta 0.3 kg
+            0.5: 28.50,   # De 0.3 a 0.5 kg
+            1.0: 33,      # De 0.5 a 1 kg
+            2.0: 35,      # De 1 a 2 kg
+            3.0: 37,      # De 2 a 3 kg
+            4.0: 39,      # De 3 a 4 kg
+            5.0: 40,      # De 4 a 5 kg
+            7.0: 45,      # De 5 a 7 kg
+            9.0: 51,      # De 7 a 9 kg
+            12.0: 59,     # De 9 a 12 kg
+            15.0: 69,     # De 12 a 15 kg
+            20.0: 81,     # De 15 a 20 kg
+            30.0: 102,    # De 20 a 30 kg
+            40.0: 126,    # De 30 a 40 kg
+            50.0: 163,    # De 40 a 50 kg
+            60.0: 183,    # De 50 a 60 kg
         },
         "mid": {   # $99 - $198.99
-            0.3: 32, 0.5: 34, 1.0: 38, 2.0: 40, 3.0: 46, 4.0: 50,
-            5.0: 53, 7.0: 59, 9.0: 67, 12.0: 78, 15.0: 92, 20.0: 108,
-            30.0: 137, 40.0: 170, 50.0: 220, 60.0: 247
+            0.3: 32,
+            0.5: 34,
+            1.0: 38,
+            2.0: 40,
+            3.0: 46,
+            4.0: 50,
+            5.0: 53,
+            7.0: 59,
+            9.0: 67,
+            12.0: 78,
+            15.0: 92,
+            20.0: 108,
+            30.0: 137,
+            40.0: 170,
+            50.0: 220,
+            60.0: 247,
         },
         "high": {  # $199 - $298.99
-            0.3: 35, 0.5: 38, 1.0: 39, 2.0: 41, 3.0: 48, 4.0: 54,
-            5.0: 59, 7.0: 70, 9.0: 81, 12.0: 96, 15.0: 113, 20.0: 140,
-            30.0: 195, 40.0: 250, 50.0: 305, 60.0: 334
+            0.3: 35,
+            0.5: 38,
+            1.0: 39,
+            2.0: 41,
+            3.0: 48,
+            4.0: 54,
+            5.0: 59,
+            7.0: 70,
+            9.0: 81,
+            12.0: 96,
+            15.0: 113,
+            20.0: 140,
+            30.0: 195,
+            40.0: 250,
+            50.0: 305,
+            60.0: 334,
         },
-        "free": {  # >= $299 (envío gratis — vendedor paga 50% aprox)
-            0.3: 26.20, 0.5: 28, 1.0: 29.80, 2.0: 33.80, 3.0: 38,
-            5.0: 44, 7.0: 49, 9.0: 55.80, 12.0: 64.60, 15.0: 76,
-            20.0: 89, 30.0: 112.60
+        "free": {  # >= $299 (envío gratis — vendedor paga costo real, no mitad)
+            # Costo por envío gratis (productos < $299 con envío gratis activado)
+            0.3: 52.40,
+            0.5: 56,
+            1.0: 59.60,
+            2.0: 67.60,
+            3.0: 76,
+            4.0: 82.40,
+            5.0: 88,
+            7.0: 98,
+            9.0: 111.60,
+            12.0: 129.20,
+            15.0: 152,
+            20.0: 178,
+            30.0: 225.20,
         }
     }
     
