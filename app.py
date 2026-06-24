@@ -713,16 +713,15 @@ def calculate_amazon_from_fixed_base(cost, base_price, discount_pct, category_na
     }
 
 # ============================================================
-# SHOPIFY SYNC — MOREKASHOP1
+# SHOPIFY SYNC — MOREKASHOP1 (con pesos y medidas)
 # ============================================================
 @st.cache_data(ttl=300)
 def fetch_shopify_products():
-    """Obtiene productos de morekashop1 con costos."""
+    """Obtiene productos de morekashop1 con costos, pesos y medidas."""
     try:
         token = st.secrets.get("shopify", {}).get("MOREKA_ACCESS_TOKEN", 
                os.getenv("SHOPIFY_MOREKA_TOKEN", ""))
         if not token:
-            st.error("❌ Token de Shopify no configurado. Agrega `SHOPIFY_MOREKA_TOKEN` a los Secrets de Streamlit.")
             return []
         
         shop = "morekashop1"
@@ -741,13 +740,69 @@ def fetch_shopify_products():
             try:
                 r = requests.get(url, headers=headers, timeout=30)
                 if r.status_code != 200:
-                    st.error(f"Error Shopify: {r.status_code} - {r.text[:200]}")
                     return []
                 
                 data = r.json()
                 for product in data.get("products", []):
                     for variant in product.get("variants", []):
                         inv_id = variant.get("inventory_item_id")
+                        
+                        # Obtener peso y dimensiones del variant
+                        weight = variant.get("weight", 0)
+                        weight_unit = variant.get("weight_unit", "kg")
+                        length = variant.get("length", 0)
+                        width = variant.get("width", 0)
+                        height = variant.get("height", 0)
+                        dimension_unit = variant.get("dimension_unit", "cm")
+                        
+                        # Convertir peso a kg
+                        peso_kg = 0
+                        if weight and weight_unit:
+                            try:
+                                w = float(weight)
+                                if weight_unit == "kg":
+                                    peso_kg = w
+                                elif weight_unit == "g":
+                                    peso_kg = w / 1000
+                                elif weight_unit == "lb":
+                                    peso_kg = w * 0.453592
+                                elif weight_unit == "oz":
+                                    peso_kg = w * 0.0283495
+                            except:
+                                pass
+                        
+                        # Convertir dimensiones a cm
+                        largo_cm = 0
+                        ancho_cm = 0
+                        profundidad_cm = 0
+                        if length and dimension_unit:
+                            try:
+                                l = float(length)
+                                if dimension_unit == "cm":
+                                    largo_cm = l
+                                elif dimension_unit == "in":
+                                    largo_cm = l * 2.54
+                            except:
+                                pass
+                        if width and dimension_unit:
+                            try:
+                                w = float(width)
+                                if dimension_unit == "cm":
+                                    ancho_cm = w
+                                elif dimension_unit == "in":
+                                    ancho_cm = w * 2.54
+                            except:
+                                pass
+                        if height and dimension_unit:
+                            try:
+                                h = float(height)
+                                if dimension_unit == "cm":
+                                    profundidad_cm = h
+                                elif dimension_unit == "in":
+                                    profundidad_cm = h * 2.54
+                            except:
+                                pass
+                        
                         products.append({
                             "ID": product.get("id"),
                             "Título": product.get("title", ""),
@@ -759,6 +814,10 @@ def fetch_shopify_products():
                             "Precio Shopify": float(variant.get("price", 0) or 0),
                             "Status": product.get("status", ""),
                             "Inventory Item ID": inv_id,
+                            "Peso kg": round(peso_kg, 3) if peso_kg > 0 else 0,
+                            "Largo cm": round(largo_cm, 2) if largo_cm > 0 else 0,
+                            "Ancho cm": round(ancho_cm, 2) if ancho_cm > 0 else 0,
+                            "Profundidad cm": round(profundidad_cm, 2) if profundidad_cm > 0 else 0,
                         })
                         if inv_id:
                             inventory_item_ids.append(inv_id)
@@ -773,7 +832,6 @@ def fetch_shopify_products():
                 
                 time.sleep(0.5)
             except Exception as e:
-                st.error(f"Error en página {page_count}: {e}")
                 break
         
         if inventory_item_ids:
@@ -798,7 +856,7 @@ def fetch_shopify_products():
                                     pass
                     time.sleep(0.5)
                 except Exception as e:
-                    st.warning(f"Error batch {i}: {e}")
+                    pass
             
             for p in products:
                 inv_id = p["Inventory Item ID"]
@@ -807,7 +865,6 @@ def fetch_shopify_products():
         
         return products
     except Exception as e:
-        st.error(f"Error conectando a Shopify: {e}")
         return []
 
 # ============================================================
@@ -872,56 +929,137 @@ with st.sidebar:
     )
     
     st.markdown("---")
-    st.markdown("#### 📏 Pesos y Medidas (Google Sheets)")
+    st.markdown("#### 📏 Pesos y Medidas")
     
-    # Cargar datos de pesos y medidas
-    pesos_medidas_data, pesos_medidas_error = fetch_pesos_medidas()
+    # Fuente de datos
+    pesos_source = st.radio(
+        "Fuente de datos",
+        ["Google Sheets", "Shopify"],
+        index=0,
+        key="pesos_source"
+    )
     
     selected_product = None
     product_dimensions = None
     
-    if pesos_medidas_data:
-        st.success(f"✅ {len(pesos_medidas_data)} productos cargados")
+    if pesos_source == "Google Sheets":
+        # Cargar datos de pesos y medidas desde Google Sheets
+        pesos_medidas_data, pesos_medidas_error = fetch_pesos_medidas()
         
-        # Crear lista de productos para selección
-        product_options = []
-        product_map = {}
-        for record in pesos_medidas_data:
-            sku = str(record.get('SKU', '')).strip()
-            modelo = str(record.get('Modelo', '')).strip()
-            titulo = str(record.get('Titutlo', '')).strip()
+        if pesos_medidas_data:
+            st.success(f"✅ {len(pesos_medidas_data)} productos cargados")
             
-            if sku or modelo:
-                display = f"{sku} — {modelo}" if sku and modelo else (sku or modelo)
-                if titulo:
-                    display += f" ({titulo[:30]}...)" if len(titulo) > 30 else f" ({titulo})"
-                product_options.append(display)
-                product_map[display] = {'sku': sku, 'modelo': modelo}
-        
-        product_options = sorted(product_options)
-        product_options.insert(0, "— Seleccionar producto —")
-        
-        selected_display = st.selectbox(
-            "Seleccionar producto",
-            product_options,
-            index=0
-        )
-        
-        if selected_display != "— Seleccionar producto —":
-            selected_product = product_map[selected_display]
-            product_dimensions = get_product_dimensions(
-                selected_product['sku'], 
-                selected_product['modelo'], 
-                pesos_medidas_data
+            # Crear lista de productos para selección
+            product_options = []
+            product_map = {}
+            for record in pesos_medidas_data:
+                sku = str(record.get('SKU', '')).strip()
+                modelo = str(record.get('Modelo', '')).strip()
+                titulo = str(record.get('Titutlo', '')).strip()
+                
+                if sku or modelo:
+                    display = f"{sku} — {modelo}" if sku and modelo else (sku or modelo)
+                    if titulo:
+                        display += f" ({titulo[:30]}...)" if len(titulo) > 30 else f" ({titulo})"
+                    product_options.append(display)
+                    product_map[display] = {'sku': sku, 'modelo': modelo}
+            
+            product_options = sorted(product_options)
+            product_options.insert(0, "— Seleccionar producto —")
+            
+            selected_display = st.selectbox(
+                "Seleccionar producto (Google Sheets)",
+                product_options,
+                index=0,
+                key="gsheets_select"
             )
             
-            if product_dimensions:
-                st.markdown("<div class='success-box'>📏 Producto encontrado</div>", unsafe_allow_html=True)
-    else:
-        if pesos_medidas_error:
-            st.error(f"❌ Error: {pesos_medidas_error}")
+            if selected_display != "— Seleccionar producto —":
+                selected_product = product_map[selected_display]
+                product_dimensions = get_product_dimensions(
+                    selected_product['sku'], 
+                    selected_product['modelo'], 
+                    pesos_medidas_data
+                )
+                
+                if product_dimensions:
+                    st.markdown("<div class='success-box'>📏 Producto encontrado</div>", unsafe_allow_html=True)
         else:
-            st.warning("⚠️ No se pudieron cargar datos de pesos y medidas")
+            if pesos_medidas_error:
+                st.error(f"❌ Error: {pesos_medidas_error}")
+            else:
+                st.warning("⚠️ No se pudieron cargar datos de pesos y medidas")
+    
+    else:  # Shopify
+        st.markdown("**🛒 Productos desde Shopify**")
+        
+        # Cargar productos desde Shopify
+        shopify_products = fetch_shopify_products()
+        
+        if shopify_products:
+            # Filtrar solo productos con pesos y medidas o costos
+            products_with_data = [p for p in shopify_products if (p.get("Peso kg", 0) > 0) or (p.get("Costo") is not None)]
+            
+            st.success(f"✅ {len(products_with_data)} productos con datos")
+            
+            # Crear lista de productos para selección
+            product_options = []
+            product_map = {}
+            for p in products_with_data:
+                sku = p.get("SKU", "")
+                titulo = p.get("Título", "")
+                
+                if sku and sku != "Sin SKU":
+                    display = f"{sku} — {titulo[:40]}" if len(titulo) > 40 else f"{sku} — {titulo}"
+                    product_options.append(display)
+                    product_map[display] = p
+            
+            product_options = sorted(product_options)
+            product_options.insert(0, "— Seleccionar producto —")
+            
+            selected_display = st.selectbox(
+                "Seleccionar producto (Shopify)",
+                product_options,
+                index=0,
+                key="shopify_select"
+            )
+            
+            if selected_display != "— Seleccionar producto —":
+                selected_product = product_map[selected_display]
+                
+                # Crear product_dimensions desde Shopify
+                product_dimensions = {
+                    'sku': selected_product.get('SKU', ''),
+                    'modelo': selected_product.get('Variante', ''),
+                    'titulo': selected_product.get('Título', ''),
+                    'peso_kg': selected_product.get('Peso kg', 0),
+                    'largo_cm': selected_product.get('Largo cm', 0),
+                    'ancho_cm': selected_product.get('Ancho cm', 0),
+                    'profundidad_cm': selected_product.get('Profundidad cm', 0),
+                    'peso_caja_kg': 0,
+                    'largo_caja_cm': 0,
+                    'ancho_caja_cm': 0,
+                    'profundidad_caja_cm': 0,
+                    'peso_volumetrico': calculate_volumetric_weight(
+                        selected_product.get('Largo cm', 0),
+                        selected_product.get('Ancho cm', 0),
+                        selected_product.get('Profundidad cm', 0)
+                    )
+                }
+                
+                st.markdown("<div class='success-box'>📏 Producto encontrado</div>", unsafe_allow_html=True)
+                
+                # Mostrar datos del producto
+                st.markdown(f"""
+                <div style='font-size: 0.85rem; color: #666; margin-top: 0.5rem;'>
+                    <b>Peso:</b> {product_dimensions['peso_kg']:.3f} kg<br>
+                    <b>Dimensiones:</b> {product_dimensions['largo_cm']:.1f} × {product_dimensions['ancho_cm']:.1f} × {product_dimensions['profundidad_cm']:.1f} cm<br>
+                    <b>Peso Volumétrico:</b> {product_dimensions['peso_volumetrico']:.3f} kg<br>
+                    <b>Costo:</b> ${selected_product.get('Costo', 0):,.2f} MXN
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.warning("⚠️ No se pudieron cargar productos de Shopify. Verifica el token.")
     
     st.markdown("---")
     st.markdown("<div style='font-size: 0.8rem; color: #999;'>Comisiones actualizadas: Junio 2026<br>Fuente: SAT / ML / Amazon</div>", unsafe_allow_html=True)
