@@ -1151,7 +1151,7 @@ def fetch_meli_user_info(access_token):
 
 @st.cache_data(ttl=300)
 def fetch_meli_items(access_token, user_id, limit=50, offset=0, status="active"):
-    """Obtiene items del seller desde MELI API"""
+    """Obtiene items del seller desde MELI API con paginación"""
     try:
         url = f"{MELI_API_BASE}/users/{user_id}/items/search"
         params = {
@@ -1173,6 +1173,13 @@ def fetch_meli_items(access_token, user_id, limit=50, offset=0, status="active")
                 item_r = requests.get(f"{MELI_API_BASE}/items/{item_id}", headers=get_meli_headers(access_token), timeout=10)
                 if item_r.status_code == 200:
                     item = item_r.json()
+                    # SKU puede estar en seller_custom_field o en atributos
+                    sku = item.get("seller_custom_field", "")
+                    if not sku and item.get("attributes"):
+                        for attr in item.get("attributes", []):
+                            if attr.get("id") in ["SELLER_SKU", "MODEL", "SKU"]:
+                                sku = attr.get("value_name", "")
+                                break
                     items.append({
                         "id": item.get("id"),
                         "title": item.get("title", ""),
@@ -1187,24 +1194,46 @@ def fetch_meli_items(access_token, user_id, limit=50, offset=0, status="active")
                         "category_id": item.get("category_id", ""),
                         "listing_type_id": item.get("listing_type_id", ""),
                         "shipping": item.get("shipping", {}),
-                        "sku": item.get("seller_custom_field", "") or item.get("attributes", [{}])[0].get("value_name", "") if item.get("attributes") else "",
+                        "sku": sku,
                     })
                 time.sleep(0.1)
             except:
                 continue
-        
         return items, None
     except Exception as e:
         return [], str(e)
 
+@st.cache_data(ttl=60)
+def fetch_meli_item_details(access_token, item_id):
+    """Obtiene detalles completos de un item específico"""
+    try:
+        r = requests.get(f"{MELI_API_BASE}/items/{item_id}", headers=get_meli_headers(access_token), timeout=10)
+        if r.status_code == 200:
+            return r.json()
+        return None
+    except:
+        return None
+
+@st.cache_data(ttl=60)
+def fetch_meli_promotions(access_token, user_id, status="active"):
+    """Obtiene promociones activas del seller"""
+    try:
+        url = f"{MELI_API_BASE}/marketplace/seller-promotions"
+        params = {"user_id": user_id, "status": status, "promotion_type": "PRICE_DISCOUNT"}
+        r = requests.get(url, headers=get_meli_headers(access_token), params=params, timeout=15)
+        if r.status_code == 200:
+            return r.json()
+        return None
+    except:
+        return None
+
 def update_meli_item_price(access_token, item_id, new_price, original_price=None):
-    """Actualiza el precio de un item en MELI"""
+    """Actualiza el precio de un item en MELI (solo precio, no promoción oficial)"""
     try:
         url = f"{MELI_API_BASE}/items/{item_id}"
         body = {"price": new_price}
         if original_price and original_price > new_price:
             body["original_price"] = original_price
-        
         r = requests.put(url, headers=get_meli_headers(access_token), json=body, timeout=15)
         if r.status_code in [200, 201]:
             return True, r.json()
@@ -1212,6 +1241,44 @@ def update_meli_item_price(access_token, item_id, new_price, original_price=None
             return False, f"HTTP {r.status_code}: {r.text}"
     except Exception as e:
         return False, str(e)
+
+def apply_meli_promotion(access_token, item_id, user_id, deal_price, original_price, start_date=None, finish_date=None):
+    """
+    Aplica una promoción oficial de MELI (PRICE_DISCOUNT).
+    Requiere: user_id, deal_price, fechas.
+    """
+    try:
+        url = f"{MELI_API_BASE}/marketplace/seller-promotions/items/{item_id}"
+        params = {"user_id": user_id}
+        headers = get_meli_headers(access_token)
+        headers["version"] = "v2"
+        headers["X-Client-Id"] = st.secrets.get("meli", {}).get("app_id", "")
+        headers["X-Caller-Id"] = st.secrets.get("meli", {}).get("app_id", "")
+        
+        if not start_date:
+            start_date = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        if not finish_date:
+            finish_date = (datetime.now().replace(day=datetime.now().day + 7)).strftime("%Y-%m-%dT23:59:59")
+        
+        body = {
+            "deal_price": round(deal_price, 2),
+            "top_deal_price": round(deal_price * 0.95, 2),  # 5% más barato para loyalty
+            "start_date": start_date,
+            "finish_date": finish_date,
+            "promotion_type": "PRICE_DISCOUNT"
+        }
+        
+        r = requests.post(url, headers=headers, params=params, json=body, timeout=15)
+        if r.status_code in [200, 201]:
+            return True, r.json()
+        else:
+            return False, f"HTTP {r.status_code}: {r.text}"
+    except Exception as e:
+        return False, str(e)
+
+def calculate_meli_net_received(price, fees, shipping_cost):
+    """Calcula el pago neto que MELI muestra: precio - comisiones - envío"""
+    return price - fees["total_fees"] - shipping_cost
 
 def calculate_meli_promo_discount(cost, current_price, target_margin_pct, category_name, listing_type="classic", has_rfc=True, peso_kg=0, largo_cm=0, ancho_cm=0, profundidad_cm=0):
     """
@@ -1222,42 +1289,46 @@ def calculate_meli_promo_discount(cost, current_price, target_margin_pct, catego
     - 10% = 10% de ganancia sobre lo recibido
     
     Fórmula:
-    1. Calcular comisiones MELI sobre precio con descuento
-    2. Calcular envío
-    3. Pago neto = precio con descuento - comisiones - envío
-    4. Ganancia deseada = pago neto * target_margin_pct
-    5. Precio con descuento debe cumplir: pago neto - costo = ganancia deseada
-       → pago neto = costo / (1 - target_margin_pct)
-    6. Despejar precio con descuento iterativamente
+    1. Pago neto objetivo = costo / (1 - target_margin_pct)
+    2. Iterar para encontrar precio con descuento que dé ese pago neto
+    3. Descontar comisiones y envío
     """
-    # Objetivo: pago neto = costo / (1 - target_margin)
     target_net = cost / (1 - target_margin_pct)
-    
-    # Iterar para encontrar precio con descuento que dé el pago neto objetivo
-    price_discounted = cost * 1.5  # estimación inicial
+    price_discounted = cost * 1.5
     
     for _ in range(30):
-        # Calcular comisiones sobre precio con descuento
         fees = calculate_ml_fees(price_discounted, category_name, listing_type, has_rfc)
-        
-        # Calcular envío
         shipping = get_ml_shipping_cost(price_discounted, peso_kg, largo_cm, ancho_cm, profundidad_cm)
+        net_received = calculate_meli_net_received(price_discounted, fees, shipping)
         
-        # Pago neto = precio - comisiones - envío
-        net_received = price_discounted - fees["total_fees"] - shipping
-        
-        # Ajustar precio para acercarnos al target_net
         if abs(net_received - target_net) < 0.5:
             break
         
-        # Factor de ajuste proporcional
         if net_received > 0:
             adjustment = target_net / net_received
             price_discounted = price_discounted * adjustment
         else:
             price_discounted = price_discounted * 1.1
     
-    # Calcular descuento sobre precio actual
+    discount_pct = ((current_price - price_discounted) / current_price) * 100 if current_price > 0 else 0
+    
+    fees = calculate_ml_fees(price_discounted, category_name, listing_type, has_rfc)
+    shipping = get_ml_shipping_cost(price_discounted, peso_kg, largo_cm, ancho_cm, profundidad_cm)
+    net_received = calculate_meli_net_received(price_discounted, fees, shipping)
+    profit = net_received - cost
+    margin = (profit / net_received) * 100 if net_received > 0 else 0
+    
+    return {
+        "price_discounted": round(price_discounted, 2),
+        "discount_pct": round(discount_pct, 1),
+        "original_price": current_price,
+        "net_received": round(net_received, 2),
+        "profit": round(profit, 2),
+        "margin": round(margin, 2),
+        "fees": fees,
+        "shipping_cost": round(shipping, 2),
+        "target_net": round(target_net, 2),
+    }
     discount_pct = 0
     if current_price > 0 and price_discounted < current_price:
         discount_pct = (current_price - price_discounted) / current_price
@@ -2017,18 +2088,40 @@ with tab4:
     # ============================================================
     st.markdown("### 🔐 Conexión con Mercado Libre")
     
+    # Intentar obtener token desde secrets primero
+    meli_token_from_secrets = ""
+    try:
+        meli_secrets = st.secrets.get("meli", {})
+        if meli_secrets:
+            meli_token_from_secrets = meli_secrets.get("access_token", "")
+    except:
+        pass
+    
     meli_col1, meli_col2 = st.columns([2, 1])
     
     with meli_col1:
-        meli_token = st.text_input(
-            "Access Token de Mercado Libre",
-            value=st.session_state.get("meli_token", ""),
-            type="password",
-            placeholder="APP_USR-XXXXXXXX...",
-            help="Obtén tu token en: https://developers.mercadolibre.com.ar/devcenter"
-        )
-        if meli_token:
-            st.session_state["meli_token"] = meli_token
+        if meli_token_from_secrets:
+            st.success("✅ Token cargado automáticamente desde Secrets")
+            meli_token = meli_token_from_secrets
+            # Ocultar input si ya hay token en secrets
+            show_token_input = st.checkbox("Mostrar token manual", value=False)
+            if show_token_input:
+                meli_token = st.text_input(
+                    "Access Token de Mercado Libre",
+                    value=meli_token_from_secrets,
+                    type="password",
+                    placeholder="APP_USR-XXXXXXXX..."
+                )
+        else:
+            meli_token = st.text_input(
+                "Access Token de Mercado Libre",
+                value=st.session_state.get("meli_token", ""),
+                type="password",
+                placeholder="APP_USR-XXXXXXXX...",
+                help="Obtén tu token en: https://developers.mercadolibre.com.ar/devcenter"
+            )
+            if meli_token:
+                st.session_state["meli_token"] = meli_token
     
     with meli_col2:
         st.markdown("<br>", unsafe_allow_html=True)
@@ -2058,7 +2151,7 @@ with tab4:
                     else:
                         st.info(f"📦 {len(meli_items)} publicaciones activas cargadas")
     elif meli_token:
-        # Reutilizar token de sesión
+        # Reutilizar token de sesión o secrets
         meli_user = fetch_meli_user_info(meli_token)
         if "error" not in meli_user:
             user_id = meli_user.get("id")
@@ -2281,14 +2374,14 @@ with tab4:
                         "title": item["title"],
                         "current_price": item["current_price"],
                         "costo": costo,
-                        "precio_promo": resultado["discounted_price"],
+                        "precio_promo": resultado["price_discounted"],
                         "descuento_pct": resultado["discount_pct"],
-                        "descuento_monto": resultado["discount_amount"],
+                        "descuento_monto": round(item["current_price"] - resultado["price_discounted"], 2) if item["current_price"] > resultado["price_discounted"] else 0,
                         "comisiones": resultado["fees"]["total_fees"],
                         "envio": resultado["shipping_cost"],
                         "pago_neto": resultado["net_received"],
                         "ganancia": resultado["profit"],
-                        "margen_sobre_neto": resultado["margin_on_net"],
+                        "margen_sobre_neto": resultado["margin"],
                         "aplicar": resultado["discount_pct"] > 0 and resultado["profit"] > 0,
                     })
                 
@@ -2394,15 +2487,17 @@ with tab4:
                         disabled=len(aplicables) == 0
                     )
                     
-                    if aplicar_masivo and meli_token:
-                        with st.spinner("Aplicando descuentos..."):
+                    if aplicar_masivo and meli_token and user_id:
+                        with st.spinner("Aplicando promociones..."):
                             aplicados = 0
                             errores = []
                             
                             for r in aplicables:
-                                success, result = update_meli_item_price(
+                                # Aplicar promoción oficial de MELI (PRICE_DISCOUNT)
+                                success, result = apply_meli_promotion(
                                     meli_token,
                                     r["meli_id"],
+                                    user_id,
                                     r["precio_promo"],
                                     r["current_price"]
                                 )
@@ -2413,13 +2508,15 @@ with tab4:
                                 time.sleep(0.2)  # Rate limiting
                             
                             if aplicados > 0:
-                                st.success(f"✅ {aplicados} descuentos aplicados correctamente")
+                                st.success(f"✅ {aplicados} promociones aplicadas correctamente")
                             if errores:
                                 with st.expander(f"❌ Errores ({len(errores)})"):
                                     for err in errores[:10]:
                                         st.markdown(f"• {err}")
                                     if len(errores) > 10:
                                         st.markdown(f"... y {len(errores) - 10} más")
+                    elif aplicar_masivo:
+                        st.error("❌ No hay token de MELI o user_id configurado")
                 else:
                     st.error("❌ No se pudieron calcular descuentos. Verifica que los productos tengan costos asignados.")
     else:
