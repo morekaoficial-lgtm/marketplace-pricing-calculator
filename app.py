@@ -1215,17 +1215,23 @@ def fetch_meli_item_details(access_token, item_id):
         return None
 
 @st.cache_data(ttl=60)
-def fetch_meli_promotions(access_token, user_id, status="active"):
-    """Obtiene promociones activas del seller"""
+def fetch_meli_item_prices(access_token, item_id):
+    """Obtiene precios y promociones activas de un item (endpoint /items/{id}/prices)"""
     try:
-        url = f"{MELI_API_BASE}/marketplace/seller-promotions"
-        params = {"user_id": user_id, "status": status, "promotion_type": "PRICE_DISCOUNT"}
-        r = requests.get(url, headers=get_meli_headers(access_token), params=params, timeout=15)
+        url = f"{MELI_API_BASE}/items/{item_id}/prices"
+        r = requests.get(url, headers=get_meli_headers(access_token), timeout=10)
         if r.status_code == 200:
             return r.json()
         return None
     except:
         return None
+
+@st.cache_data(ttl=60)
+def fetch_meli_promotions(access_token, user_id, status="active"):
+    """Obtiene promociones activas del seller — NOTA: endpoint /marketplace/seller-promotions puede no estar disponible"""
+    # Este endpoint requiere permisos especiales y a menudo devuelve 403/404
+    # Mejor usar fetch_meli_item_prices() por item
+    return None
 
 def update_meli_item_price(access_token, item_id, new_price, original_price=None):
     """Actualiza el precio de un item en MELI (solo precio, no promoción oficial)"""
@@ -2368,6 +2374,44 @@ with tab4:
                         profundidad_cm=item["profundidad_cm"]
                     )
                     
+                    # También agregar costo manual si existe
+                    costo_manual = edited_costs.get(item["meli_id"], 0)
+                    if costo_manual > 0:
+                        costo = costo_manual
+                    
+                    # Obtener promociones activas del item (desde /items/{id}/prices)
+                    promo_activas = []
+                    if meli_token and item.get("meli_id"):
+                        try:
+                            prices_data = fetch_meli_item_prices(meli_token, item["meli_id"])
+                            if prices_data and prices_data.get("prices"):
+                                for p in prices_data["prices"]:
+                                    if p.get("type") == "promotion":
+                                        promo_activas.append({
+                                            "precio": p.get("amount"),
+                                            "regular": p.get("regular_amount"),
+                                            "descuento_pct": round((1 - p.get("amount",0)/p.get("regular_amount",1)) * 100, 1) if p.get("regular_amount") else 0,
+                                            "inicio": p.get("conditions",{}).get("start_time"),
+                                            "fin": p.get("conditions",{}).get("end_time"),
+                                        })
+                        except:
+                            pass
+                    
+                    # Si el item ya tiene promociones activas, mostrarlas
+                    promo_text = ""
+                    if promo_activas:
+                        promo_parts = []
+                        for p in promo_activas:
+                            promo_parts.append(f"${p['precio']:.0f} ({p['descuento_pct']:.0f}% off)")
+                        promo_text = " | ".join(promo_parts)
+                    
+                    # Verificar si el item ya tiene promoción con mejor precio que el calculado
+                    if promo_activas:
+                        mejor_promo = min(p["precio"] for p in promo_activas)
+                        if mejor_promo <= resultado["price_discounted"]:
+                            # Ya tiene promoción igual o mejor
+                            pass
+                    
                     resultados_promo.append({
                         "meli_id": item["meli_id"],
                         "sku": item["sku"],
@@ -2383,6 +2427,7 @@ with tab4:
                         "ganancia": resultado["profit"],
                         "margen_sobre_neto": resultado["margin"],
                         "aplicar": resultado["discount_pct"] > 0 and resultado["profit"] > 0,
+                        "promos_activas": promo_text,  # ← NUEVO: promociones activas actuales
                     })
                 
                 if resultados_promo:
@@ -2414,6 +2459,7 @@ with tab4:
                             "Pago Neto": f"${r['pago_neto']:,.2f}",
                             "Ganancia": f"${r['ganancia']:,.2f}",
                             "Margen": f"{r['margen_sobre_neto']:.1f}%",
+                            "Promos Activas": r.get("promos_activas", "") or "—",
                             "Estado": "✅ Aplicable" if r["aplicar"] else "❌ No aplica",
                         }
                         for r in resultados_promo
