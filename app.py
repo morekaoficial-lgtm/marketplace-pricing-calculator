@@ -1126,12 +1126,176 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ============================================================
+# API MERCADO LIBRE — PROMOCIONES Y DESCUENTOS
+# ============================================================
+MELI_API_BASE = "https://api.mercadolibre.com"
+
+def get_meli_headers(access_token):
+    """Headers para requests a API de Mercado Libre"""
+    return {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
+    }
+
+@st.cache_data(ttl=300)
+def fetch_meli_user_info(access_token):
+    """Obtiene información del usuario autenticado en MELI"""
+    try:
+        r = requests.get(f"{MELI_API_BASE}/users/me", headers=get_meli_headers(access_token), timeout=15)
+        if r.status_code == 200:
+            return r.json()
+        else:
+            return {"error": f"HTTP {r.status_code}: {r.text}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+@st.cache_data(ttl=300)
+def fetch_meli_items(access_token, user_id, limit=50, offset=0, status="active"):
+    """Obtiene items del seller desde MELI API"""
+    try:
+        url = f"{MELI_API_BASE}/users/{user_id}/items/search"
+        params = {
+            "limit": limit,
+            "offset": offset,
+            "status": status
+        }
+        r = requests.get(url, headers=get_meli_headers(access_token), params=params, timeout=15)
+        if r.status_code != 200:
+            return [], f"HTTP {r.status_code}: {r.text}"
+        
+        data = r.json()
+        item_ids = data.get("results", [])
+        
+        # Obtener detalles de cada item
+        items = []
+        for item_id in item_ids:
+            try:
+                item_r = requests.get(f"{MELI_API_BASE}/items/{item_id}", headers=get_meli_headers(access_token), timeout=10)
+                if item_r.status_code == 200:
+                    item = item_r.json()
+                    items.append({
+                        "id": item.get("id"),
+                        "title": item.get("title", ""),
+                        "price": item.get("price", 0),
+                        "base_price": item.get("base_price", item.get("price", 0)),
+                        "original_price": item.get("original_price"),
+                        "available_quantity": item.get("available_quantity", 0),
+                        "sold_quantity": item.get("sold_quantity", 0),
+                        "status": item.get("status", ""),
+                        "permalink": item.get("permalink", ""),
+                        "thumbnail": item.get("thumbnail", ""),
+                        "category_id": item.get("category_id", ""),
+                        "listing_type_id": item.get("listing_type_id", ""),
+                        "shipping": item.get("shipping", {}),
+                        "sku": item.get("seller_custom_field", "") or item.get("attributes", [{}])[0].get("value_name", "") if item.get("attributes") else "",
+                    })
+                time.sleep(0.1)
+            except:
+                continue
+        
+        return items, None
+    except Exception as e:
+        return [], str(e)
+
+def update_meli_item_price(access_token, item_id, new_price, original_price=None):
+    """Actualiza el precio de un item en MELI"""
+    try:
+        url = f"{MELI_API_BASE}/items/{item_id}"
+        body = {"price": new_price}
+        if original_price and original_price > new_price:
+            body["original_price"] = original_price
+        
+        r = requests.put(url, headers=get_meli_headers(access_token), json=body, timeout=15)
+        if r.status_code in [200, 201]:
+            return True, r.json()
+        else:
+            return False, f"HTTP {r.status_code}: {r.text}"
+    except Exception as e:
+        return False, str(e)
+
+def calculate_meli_promo_discount(cost, current_price, target_margin_pct, category_name, listing_type="classic", has_rfc=True, peso_kg=0, largo_cm=0, ancho_cm=0, profundidad_cm=0):
+    """
+    Calcula el descuento a aplicar para una promoción de MELI.
+    
+    target_margin_pct: margen deseado sobre el PAGO NETO que indica MELI
+    - 5% = 5% de utilidad sobre lo recibido
+    - 10% = 10% de ganancia sobre lo recibido
+    
+    Fórmula:
+    1. Calcular comisiones MELI sobre precio con descuento
+    2. Calcular envío
+    3. Pago neto = precio con descuento - comisiones - envío
+    4. Ganancia deseada = pago neto * target_margin_pct
+    5. Precio con descuento debe cumplir: pago neto - costo = ganancia deseada
+       → pago neto = costo / (1 - target_margin_pct)
+    6. Despejar precio con descuento iterativamente
+    """
+    # Objetivo: pago neto = costo / (1 - target_margin)
+    target_net = cost / (1 - target_margin_pct)
+    
+    # Iterar para encontrar precio con descuento que dé el pago neto objetivo
+    price_discounted = cost * 1.5  # estimación inicial
+    
+    for _ in range(30):
+        # Calcular comisiones sobre precio con descuento
+        fees = calculate_ml_fees(price_discounted, category_name, listing_type, has_rfc)
+        
+        # Calcular envío
+        shipping = get_ml_shipping_cost(price_discounted, peso_kg, largo_cm, ancho_cm, profundidad_cm)
+        
+        # Pago neto = precio - comisiones - envío
+        net_received = price_discounted - fees["total_fees"] - shipping
+        
+        # Ajustar precio para acercarnos al target_net
+        if abs(net_received - target_net) < 0.5:
+            break
+        
+        # Factor de ajuste proporcional
+        if net_received > 0:
+            adjustment = target_net / net_received
+            price_discounted = price_discounted * adjustment
+        else:
+            price_discounted = price_discounted * 1.1
+    
+    # Calcular descuento sobre precio actual
+    discount_pct = 0
+    if current_price > 0 and price_discounted < current_price:
+        discount_pct = (current_price - price_discounted) / current_price
+    
+    # Validar que no sea negativo
+    if discount_pct < 0:
+        discount_pct = 0
+        price_discounted = current_price
+    
+    # Recalcular valores finales
+    fees = calculate_ml_fees(price_discounted, category_name, listing_type, has_rfc)
+    shipping = get_ml_shipping_cost(price_discounted, peso_kg, largo_cm, ancho_cm, profundidad_cm)
+    net_received = price_discounted - fees["total_fees"] - shipping
+    profit = net_received - cost
+    margin_on_net = (profit / net_received * 100) if net_received > 0 else 0
+    
+    return {
+        "current_price": current_price,
+        "discounted_price": round(price_discounted, 2),
+        "discount_pct": round(discount_pct * 100, 1),
+        "discount_amount": round(current_price - price_discounted, 2),
+        "cost": cost,
+        "fees": fees,
+        "shipping_cost": shipping,
+        "net_received": round(net_received, 2),
+        "profit": round(profit, 2),
+        "margin_on_net": round(margin_on_net, 2),
+        "target_margin_pct": target_margin_pct * 100,
+    }
+
+# ============================================================
 # TABS PRINCIPALES
 # ============================================================
-tab1, tab2, tab3 = st.tabs([
+tab1, tab2, tab3, tab4 = st.tabs([
     "🧮 Calculadora Manual",
     "📊 Comparador ML vs Amazon",
-    "🔄 Sincronizar Shopify"
+    "🔄 Sincronizar Shopify",
+    "🎯 Promociones ML"
 ])
 
 # ============================================================
@@ -1832,6 +1996,434 @@ with tab3:
     
     **Nota:** Los costos se leen desde `inventory_items.cost` en la API de Shopify.
     """)
+
+# ============================================================
+# TAB 4: PROMOCIONES MERCADO LIBRE
+# ============================================================
+with tab4:
+    st.markdown('<div class="main-header">🎯 Promociones Mercado Libre</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">Conecta tu cuenta de MELI, arquea costos desde Shopify y calcula descuentos masivos para promociones</div>', unsafe_allow_html=True)
+    
+    st.markdown("""
+    <div class="success-box">
+        <b>💡 Cómo funciona:</b> Conecta tu cuenta de Mercado Libre, carga tus publicaciones activas, 
+        cruza con costos de Shopify y calcula el <b>descuento óptimo</b> para promociones.
+        El margen se calcula sobre el <b>pago neto</b> que indica Mercado Libre (lo que realmente recibes).
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # ============================================================
+    # SECCIÓN 1: AUTENTICACIÓN MELI
+    # ============================================================
+    st.markdown("### 🔐 Conexión con Mercado Libre")
+    
+    meli_col1, meli_col2 = st.columns([2, 1])
+    
+    with meli_col1:
+        meli_token = st.text_input(
+            "Access Token de Mercado Libre",
+            value=st.session_state.get("meli_token", ""),
+            type="password",
+            placeholder="APP_USR-XXXXXXXX...",
+            help="Obtén tu token en: https://developers.mercadolibre.com.ar/devcenter"
+        )
+        if meli_token:
+            st.session_state["meli_token"] = meli_token
+    
+    with meli_col2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        connect_meli = st.button("🔗 Conectar con MELI", type="primary", use_container_width=True)
+    
+    # Estado de conexión
+    meli_user = None
+    meli_items = []
+    meli_error = None
+    
+    if connect_meli and meli_token:
+        with st.spinner("Conectando con Mercado Libre..."):
+            meli_user = fetch_meli_user_info(meli_token)
+            if "error" in meli_user:
+                meli_error = meli_user["error"]
+                st.error(f"❌ Error de conexión: {meli_error}")
+            else:
+                user_id = meli_user.get("id")
+                user_nickname = meli_user.get("nickname", "")
+                st.success(f"✅ Conectado como: **{user_nickname}** (ID: {user_id})")
+                
+                # Cargar items
+                with st.spinner("Cargando publicaciones..."):
+                    meli_items, err = fetch_meli_items(meli_token, user_id, limit=100, status="active")
+                    if err:
+                        st.warning(f"⚠️ Error cargando items: {err}")
+                    else:
+                        st.info(f"📦 {len(meli_items)} publicaciones activas cargadas")
+    elif meli_token:
+        # Reutilizar token de sesión
+        meli_user = fetch_meli_user_info(meli_token)
+        if "error" not in meli_user:
+            user_id = meli_user.get("id")
+            meli_items, _ = fetch_meli_items(meli_token, user_id, limit=100, status="active")
+    
+    st.markdown("---")
+    
+    # ============================================================
+    # SECCIÓN 2: CONFIGURACIÓN DE PROMOCIÓN
+    # ============================================================
+    st.markdown("### ⚙️ Configuración de la Promoción")
+    
+    config_col1, config_col2, config_col3 = st.columns(3)
+    
+    with config_col1:
+        promo_margin = st.radio(
+            "Margen de ganancia deseado",
+            ["5% Utilidad", "10% Ganancia"],
+            index=0,
+            help="5% = margen conservador | 10% = margen agresivo. Calculado sobre el PAGO NETO de MELI."
+        )
+        target_margin = 0.05 if promo_margin == "5% Utilidad" else 0.10
+    
+    with config_col2:
+        promo_ml_cat = st.selectbox(
+            "Categoría MELI para cálculo",
+            list(ML_CATEGORIES.keys()),
+            key="promo_ml_cat"
+        )
+        promo_listing_type = st.radio(
+            "Tipo de publicación",
+            ["classic", "premium"],
+            format_func=lambda x: "Clásica" if x == "classic" else "Premium",
+            key="promo_listing"
+        )
+    
+    with config_col3:
+        promo_has_rfc = st.checkbox("Tengo RFC registrado", value=has_rfc, key="promo_rfc")
+        st.markdown("<div style='font-size: 0.8rem; color: #666;'>Afecta IVA/ISR retenido</div>", unsafe_allow_html=True)
+    
+    st.markdown("---")
+    
+    # ============================================================
+    # SECCIÓN 3: ARQUEO DE COSTOS DESDE SHOPIFY
+    # ============================================================
+    st.markdown("### 📦 Arqueo de Costos desde Shopify")
+    
+    if not meli_items:
+        st.warning("⚠️ Primero conecta tu cuenta de Mercado Libre para ver los productos.")
+    else:
+        # Cargar productos de Shopify para cruzar costos
+        shopify_products_for_promo = fetch_shopify_products()
+        
+        if not shopify_products_for_promo:
+            st.warning("⚠️ No se pudieron cargar productos de Shopify. Los costos deberán ingresarse manualmente.")
+            shopify_products_for_promo = []
+        
+        # Crear diccionario de costos por SKU
+        shopify_cost_map = {}
+        for p in shopify_products_for_promo:
+            sku = str(p.get("SKU", "")).strip().upper()
+            costo = p.get("Costo")
+            if sku and costo is not None:
+                shopify_cost_map[sku] = {
+                    "costo": costo,
+                    "titulo": p.get("Título", ""),
+                    "peso_kg": p.get("Peso kg", 0),
+                    "largo_cm": p.get("Largo cm", 0),
+                    "ancho_cm": p.get("Ancho cm", 0),
+                    "profundidad_cm": p.get("Profundidad cm", 0),
+                }
+        
+        # Tabla de arqueo
+        st.markdown("#### 📝 Revisa y ajusta los costos antes de calcular descuentos")
+        
+        arqueo_data = []
+        for item in meli_items:
+            item_sku = str(item.get("sku", "")).strip().upper()
+            current_price = item.get("price", 0)
+            
+            # Buscar costo en Shopify por SKU
+            costo_shopify = None
+            shopify_info = None
+            if item_sku and item_sku in shopify_cost_map:
+                shopify_info = shopify_cost_map[item_sku]
+                costo_shopify = shopify_info["costo"]
+            
+            arqueo_data.append({
+                "meli_id": item.get("id"),
+                "title": item.get("title", ""),
+                "sku": item.get("sku", ""),
+                "current_price": current_price,
+                "costo_shopify": costo_shopify,
+                "peso_kg": shopify_info["peso_kg"] if shopify_info else 0,
+                "largo_cm": shopify_info["largo_cm"] if shopify_info else 0,
+                "ancho_cm": shopify_info["ancho_cm"] if shopify_info else 0,
+                "profundidad_cm": shopify_info["profundidad_cm"] if shopify_info else 0,
+                "stock": item.get("available_quantity", 0),
+            })
+        
+        # Mostrar tabla editable de arqueo
+        df_arqueo = pd.DataFrame(arqueo_data)
+        
+        # Resumen
+        con_costo = len([x for x in arqueo_data if x["costo_shopify"] is not None])
+        sin_costo = len(arqueo_data) - con_costo
+        
+        st.markdown(f"""
+        <div class="success-box">
+            <b>📊 Resumen del arqueo:</b><br>
+            • {con_costo} productos con costo desde Shopify<br>
+            • {sin_costo} productos SIN costo (requieren ingreso manual)<br>
+            • {len(arqueo_data)} total de publicaciones activas
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Tabla con inputs para ajustar costos manuales
+        st.markdown("#### ✏️ Ajusta los costos manualmente si es necesario")
+        
+        edited_costs = {}
+        
+        # Mostrar en un dataframe editable simplificado
+        display_rows = []
+        for item in arqueo_data:
+            display_rows.append({
+                "ID MELI": item["meli_id"],
+                "SKU": item["sku"] or "—",
+                "Producto": item["title"][:50] + "..." if len(item["title"]) > 50 else item["title"],
+                "Precio Actual": f"${item['current_price']:,.2f}",
+                "Costo Shopify": f"${item['costo_shopify']:,.2f}" if item['costo_shopify'] else "—",
+                "Stock": item["stock"],
+            })
+        
+        df_display = pd.DataFrame(display_rows)
+        st.dataframe(df_display, use_container_width=True, hide_index=True, height=400)
+        
+        # Inputs manuales para productos sin costo
+        if sin_costo > 0:
+            with st.expander(f"📝 Ingresar costos manuales ({sin_costo} productos sin costo)"):
+                manual_costs = {}
+                for item in arqueo_data:
+                    if item["costo_shopify"] is None:
+                        col_a, col_b = st.columns([3, 1])
+                        with col_a:
+                            st.markdown(f"**{item['title'][:40]}** (SKU: {item['sku'] or 'N/A'})")
+                        with col_b:
+                            manual_cost = st.number_input(
+                                f"Costo MXN",
+                                min_value=0.0,
+                                value=0.0,
+                                step=10.0,
+                                key=f"manual_cost_{item['meli_id']}"
+                            )
+                            if manual_cost > 0:
+                                manual_costs[item["meli_id"]] = manual_cost
+                
+                # Actualizar costos manuales
+                for item in arqueo_data:
+                    if item["meli_id"] in manual_costs:
+                        item["costo_manual"] = manual_costs[item["meli_id"]]
+                    else:
+                        item["costo_manual"] = None
+        else:
+            for item in arqueo_data:
+                item["costo_manual"] = None
+    
+    st.markdown("---")
+    
+    # ============================================================
+    # SECCIÓN 4: CÁLCULO DE DESCUENTOS
+    # ============================================================
+    st.markdown("### 🧮 Cálculo de Descuentos para Promoción")
+    
+    if meli_items and arqueo_data:
+        calc_col1, calc_col2 = st.columns([3, 1])
+        
+        with calc_col2:
+            st.markdown("<br>", unsafe_allow_html=True)
+            calcular_descuentos = st.button("🚀 Calcular Descuentos", type="primary", use_container_width=True)
+        
+        with calc_col1:
+            st.markdown(f"""
+            <div class="warning-box">
+                <b>⚙️ Configuración actual:</b><br>
+                • Margen objetivo: <b>{promo_margin}</b> sobre pago neto de MELI<br>
+                • Categoría: <b>{promo_ml_cat}</b> ({promo_listing_type})<br>
+                • RFC: <b>{'Sí' if promo_has_rfc else 'No'}</b><br>
+                • Productos a calcular: <b>{len(arqueo_data)}</b>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        if calcular_descuentos:
+            with st.spinner("Calculando descuentos óptimos..."):
+                resultados_promo = []
+                
+                for item in arqueo_data:
+                    # Determinar costo final
+                    costo = item["costo_shopify"] if item["costo_shopify"] is not None else item.get("costo_manual", 0)
+                    
+                    if costo <= 0:
+                        continue
+                    
+                    # Calcular descuento óptimo
+                    resultado = calculate_meli_promo_discount(
+                        cost=costo,
+                        current_price=item["current_price"],
+                        target_margin_pct=target_margin,
+                        category_name=promo_ml_cat,
+                        listing_type=promo_listing_type,
+                        has_rfc=promo_has_rfc,
+                        peso_kg=item["peso_kg"],
+                        largo_cm=item["largo_cm"],
+                        ancho_cm=item["ancho_cm"],
+                        profundidad_cm=item["profundidad_cm"]
+                    )
+                    
+                    resultados_promo.append({
+                        "meli_id": item["meli_id"],
+                        "sku": item["sku"],
+                        "title": item["title"],
+                        "current_price": item["current_price"],
+                        "costo": costo,
+                        "precio_promo": resultado["discounted_price"],
+                        "descuento_pct": resultado["discount_pct"],
+                        "descuento_monto": resultado["discount_amount"],
+                        "comisiones": resultado["fees"]["total_fees"],
+                        "envio": resultado["shipping_cost"],
+                        "pago_neto": resultado["net_received"],
+                        "ganancia": resultado["profit"],
+                        "margen_sobre_neto": resultado["margin_on_net"],
+                        "aplicar": resultado["discount_pct"] > 0 and resultado["profit"] > 0,
+                    })
+                
+                if resultados_promo:
+                    st.success(f"✅ Cálculo completado para {len(resultados_promo)} productos")
+                    
+                    # Mostrar resumen
+                    aplicables = [r for r in resultados_promo if r["aplicar"]]
+                    no_aplicables = [r for r in resultados_promo if not r["aplicar"]]
+                    
+                    st.markdown(f"""
+                    <div class="success-box">
+                        <b>📊 Resumen de descuentos calculados:</b><br>
+                        • Productos aplicables: <b>{len(aplicables)}</b><br>
+                        • Productos NO aplicables (pérdida o sin descuento): <b>{len(no_aplicables)}</b><br>
+                        • Descuento promedio: <b>{sum(r['descuento_pct'] for r in aplicables) / len(aplicables):.1f}%</b> (de los aplicables)
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    # Tabla de resultados
+                    df_resultados = pd.DataFrame([
+                        {
+                            "ID MELI": r["meli_id"],
+                            "SKU": r["sku"] or "—",
+                            "Producto": r["title"][:40] + "..." if len(r["title"]) > 40 else r["title"],
+                            "Precio Actual": f"${r['current_price']:,.2f}",
+                            "Costo": f"${r['costo']:,.2f}",
+                            "Precio Promo": f"${r['precio_promo']:,.2f}",
+                            "Descuento": f"{r['descuento_pct']:.1f}%",
+                            "Pago Neto": f"${r['pago_neto']:,.2f}",
+                            "Ganancia": f"${r['ganancia']:,.2f}",
+                            "Margen": f"{r['margen_sobre_neto']:.1f}%",
+                            "Estado": "✅ Aplicable" if r["aplicar"] else "❌ No aplica",
+                        }
+                        for r in resultados_promo
+                    ])
+                    
+                    st.dataframe(df_resultados, use_container_width=True, hide_index=True, height=500)
+                    
+                    # Descargar planilla de descuentos
+                    st.markdown("### 📥 Exportar Planilla de Descuentos")
+                    
+                    # CSV completo
+                    csv_promo = io.StringIO()
+                    pd.DataFrame(resultados_promo).to_csv(csv_promo, index=False)
+                    st.download_button(
+                        "📄 Descargar CSV completo",
+                        csv_promo.getvalue(),
+                        f"promocion_meli_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                        "text/csv"
+                    )
+                    
+                    # Solo aplicables
+                    if aplicables:
+                        csv_aplicables = io.StringIO()
+                        pd.DataFrame(aplicables).to_csv(csv_aplicables, index=False)
+                        st.download_button(
+                            "✅ Descargar solo aplicables",
+                            csv_aplicables.getvalue(),
+                            f"promocion_meli_aplicables_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                            "text/csv"
+                        )
+                    
+                    # Cards de productos con mejor margen
+                    st.markdown("### 🏆 Productos con Mejor Margen")
+                    
+                    top_products = sorted([r for r in resultados_promo if r["aplicar"]], 
+                                         key=lambda x: x["margen_sobre_neto"], reverse=True)[:6]
+                    
+                    if top_products:
+                        top_cols = st.columns(3)
+                        for i, r in enumerate(top_products):
+                            with top_cols[i % 3]:
+                                st.markdown(f"""
+                                <div class="scenario-card best">
+                                    <b>{r['title'][:35]}</b><br>
+                                    <span style="color: #666; font-size: 0.85rem;">SKU: {r['sku'] or 'N/A'}</span><br><br>
+                                    <b>Precio actual:</b> ${r['current_price']:,.2f}<br>
+                                    <b>Precio promo:</b> ${r['precio_promo']:,.2f}<br>
+                                    <b>Descuento:</b> {r['descuento_pct']:.1f}%<br>
+                                    <b>Pago neto:</b> ${r['pago_neto']:,.2f}<br>
+                                    <b>Ganancia:</b> ${r['ganancia']:,.2f}<br>
+                                    <b>Margen:</b> {r['margen_sobre_neto']:.1f}%
+                                </div>
+                                """, unsafe_allow_html=True)
+                    
+                    # Sección de aplicación masiva (solo visual, no ejecuta realmente por seguridad)
+                    st.markdown("---")
+                    st.markdown("### ⚡ Aplicación Masiva de Descuentos")
+                    
+                    st.warning("""
+                    ⚠️ **Advertencia:** La aplicación de descuentos modificará los precios reales en Mercado Libre.
+                    
+                    Revisa cuidadosamente los cálculos antes de aplicar. Se recomienda:
+                    1. Descargar la planilla y verificar
+                    2. Aplicar primero a 1-2 productos de prueba
+                    3. Monitorear las métricas después de aplicar
+                    """)
+                    
+                    aplicar_masivo = st.button(
+                        f"🚀 Aplicar descuentos a {len(aplicables)} productos",
+                        type="primary",
+                        disabled=len(aplicables) == 0
+                    )
+                    
+                    if aplicar_masivo and meli_token:
+                        with st.spinner("Aplicando descuentos..."):
+                            aplicados = 0
+                            errores = []
+                            
+                            for r in aplicables:
+                                success, result = update_meli_item_price(
+                                    meli_token,
+                                    r["meli_id"],
+                                    r["precio_promo"],
+                                    r["current_price"]
+                                )
+                                if success:
+                                    aplicados += 1
+                                else:
+                                    errores.append(f"{r['meli_id']}: {result}")
+                                time.sleep(0.2)  # Rate limiting
+                            
+                            if aplicados > 0:
+                                st.success(f"✅ {aplicados} descuentos aplicados correctamente")
+                            if errores:
+                                with st.expander(f"❌ Errores ({len(errores)})"):
+                                    for err in errores[:10]:
+                                        st.markdown(f"• {err}")
+                                    if len(errores) > 10:
+                                        st.markdown(f"... y {len(errores) - 10} más")
+                else:
+                    st.error("❌ No se pudieron calcular descuentos. Verifica que los productos tengan costos asignados.")
+    else:
+        st.info("💡 Conecta tu cuenta de Mercado Libre y asegúrate de tener productos con costos para calcular los descuentos.")
 
 # ============================================================
 # FOOTER
