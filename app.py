@@ -131,18 +131,26 @@ def get_billable_weight(peso_real, largo, ancho, profundidad):
 def get_ml_shipping_cost(price, peso_kg, largo, ancho, profundidad):
     """
     Calcula costo de envío de Mercado Libre México basado en peso y dimensiones.
-    Desde abril 2026: productos < $299 usan tarifa variable por peso.
-    Productos >= $299: envío gratis, vendedor paga el costo completo del envío.
+    
+    Reglas ML México (Abril 2026):
+    - Precio >= $299: Envío GRATIS → vendedor paga el costo (tabla "free")
+    - Precio < $299: Envío lo paga el COMPRADOR → costo $0 para vendedor
+      (El comprador ve el costo de envío en checkout, pero no afecta ganancia del vendedor)
+    
+    Args:
+        price: Precio del producto (precio con descuento aplicado)
+        peso_kg, largo, ancho, profundidad: Dimensiones para calcular peso facturable
+    
+    Returns:
+        float: Costo de envío para el VENDEDOR ($0 si comprador lo paga)
     """
+    if price < 299:
+        # El comprador paga el envío → $0 costo para vendedor
+        return 0
+    
+    # Envío gratis: vendedor paga el costo
     billable_weight = get_billable_weight(peso_kg, largo, ancho, profundidad)
-    
-    if price >= 299:
-        # Envío gratis: vendedor paga el costo completo del envío gratis
-        # Usar tabla de envío gratis (precios más altos)
-        return calculate_ml_shipping_table(billable_weight, 0)  # 0 = usar tabla free
-    
-    # Productos < $299: usar tabla por rango de precio
-    return calculate_ml_shipping_table(billable_weight, price)
+    return calculate_ml_shipping_table(billable_weight, 0)  # 0 = usar tabla free
 
 def calculate_ml_shipping_table(peso_kg, price):
     """Tabla de costos de envío ML México — Abril 2026
@@ -599,18 +607,27 @@ def calculate_ml_fees(price, category_name, listing_type="classic", has_rfc=True
 
 def calculate_ml_base_price(cost, target_margin, discount_pct, category_name, listing_type="classic", has_rfc=True, shipping_cost=0, ad_cost_pct=0.10, peso_kg=0, largo_cm=0, ancho_cm=0, profundidad_cm=0):
     """Calcula el precio BASE necesario para que el precio con descuento mantenga el margen deseado.
-    Incluye costo de publicidad como % del precio de venta y envío basado en peso/dimensiones."""
+    Incluye costo de publicidad como % del precio de venta y envío basado en peso/dimensiones.
+    
+    Envío ML México:
+    - Precio con descuento < $299: envío lo paga el COMPRADOR → costo $0 para vendedor
+    - Precio con descuento >= $299: envío gratis → vendedor paga el costo (tabla free)
+    """
     
     price_discounted = cost * 2.5  # Estimación inicial
     
     for _ in range(30):
         ad_cost = price_discounted * ad_cost_pct
         
-        # Calcular envío basado en peso y dimensiones
-        if peso_kg > 0:
-            shipping = get_ml_shipping_cost(price_discounted, peso_kg, largo_cm, ancho_cm, profundidad_cm)
+        # Calcular envío: solo si precio con descuento >= $299 (envío gratis)
+        if price_discounted >= 299:
+            if peso_kg > 0:
+                shipping = get_ml_shipping_cost(price_discounted, peso_kg, largo_cm, ancho_cm, profundidad_cm)
+            else:
+                shipping = shipping_cost
         else:
-            shipping = shipping_cost
+            # Envío lo paga el comprador → $0 costo para vendedor
+            shipping = 0
         
         total_cost = cost + ad_cost + shipping
         
@@ -628,16 +645,25 @@ def calculate_ml_base_price(cost, target_margin, discount_pct, category_name, li
     return round(price_base, 2), round(price_discounted, 2)
 
 def calculate_ml_from_fixed_base(cost, base_price, discount_pct, category_name, listing_type="classic", has_rfc=True, shipping_cost=0, ad_cost_pct=0.10, peso_kg=0, largo_cm=0, ancho_cm=0, profundidad_cm=0):
-    """Desde un precio base FIJO, calcula ganancia con un % de descuento dado. Incluye publicidad y envío por peso."""
+    """Desde un precio base FIJO, calcula ganancia con un % de descuento dado. Incluye publicidad y envío por peso.
+    
+    Envío ML México:
+    - Precio con descuento < $299: envío lo paga el COMPRADOR → costo $0 para vendedor
+    - Precio con descuento >= $299: envío gratis → vendedor paga el costo (tabla free)
+    """
     price_discounted = base_price * (1 - discount_pct)
     
     ad_cost = price_discounted * ad_cost_pct
     
-    # Calcular envío basado en peso y dimensiones
-    if peso_kg > 0:
-        shipping = get_ml_shipping_cost(price_discounted, peso_kg, largo_cm, ancho_cm, profundidad_cm)
+    # Calcular envío: solo si precio con descuento >= $299 (envío gratis)
+    if price_discounted >= 299:
+        if peso_kg > 0:
+            shipping = get_ml_shipping_cost(price_discounted, peso_kg, largo_cm, ancho_cm, profundidad_cm)
+        else:
+            shipping = shipping_cost
     else:
-        shipping = shipping_cost
+        # Envío lo paga el comprador → $0 costo para vendedor
+        shipping = 0
     
     total_cost = cost + ad_cost + shipping
     
@@ -1366,21 +1392,39 @@ with tab1:
         with fee_col2:
             iva_label = "8% (con RFC)" if has_rfc else "16% (sin RFC)"
             isr_label = "2.5% (con RFC)" if has_rfc else "20% (sin RFC)"
+            
+            # Indicar si el envío lo paga el comprador o el vendedor
+            if s['discounted_price'] < 299:
+                shipping_note = "🟢 Paga el COMPRADOR (precio < $299)"
+                shipping_value = "$0.00"
+            else:
+                shipping_note = "🔴 Envío GRATIS — paga el VENDEDOR"
+                shipping_value = f"${s['shipping_cost']:,.2f}"
+            
             st.markdown(f"""
             <div class="fee-breakdown">
                 <b>IVA retenido ({iva_label}):</b> ${s['fees']['iva_ret']:,.2f}<br>
                 <b>ISR retenido ({isr_label}):</b> ${s['fees']['isr_ret']:,.2f}<br>
-                <b>Envío (por peso):</b> ${s['shipping_cost']:,.2f}<br>
-                <b><b>Total comisiones ML:</b></b> ${s['fees']['total_fees']:,.2f} + Envío ${s['shipping_cost']:,.2f}
+                <b>Envío:</b> {shipping_value} <span style="font-size: 0.8rem; color: #666;">{shipping_note}</span><br>
+                <b><b>Total comisiones ML:</b></b> ${s['fees']['total_fees']:,.2f} + Envío {shipping_value}
             </div>
             """, unsafe_allow_html=True)
         
         st.markdown("#### 🧮 Fórmula de Ganancia")
+        
+        # Indicar si envío es costo para vendedor
+        if s['discounted_price'] < 299:
+            envio_line = f"<b>Envío:</b> $0.00 (paga el comprador, precio < $299)<br>"
+        else:
+            envio_line = f"<b>Envío:</b> ${s['shipping_cost']:,.2f} (envío gratis, vendedor paga)<br>"
+        
         st.markdown(f"""
         <div class="fee-breakdown">
             <b>Precio con descuento:</b> ${s['discounted_price']:,.2f}<br>
-            <b>− Costo total (producto + publicidad + envío):</b> ${s['total_cost']:,.2f}<br>
-            <b>− Comisiones ML + Envío:</b> ${s['fees']['total_fees'] + s['shipping_cost']:,.2f}<br>
+            <b>− Costo producto:</b> ${cost:,.2f}<br>
+            <b>− Publicidad ({ad_cost_pct*100:.0f}%):</b> ${s['ad_cost']:,.2f}<br>
+            {envio_line}
+            <b>− Comisiones ML:</b> ${s['fees']['total_fees']:,.2f}<br>
             <b>= Ganancia neta:</b> ${s['profit']:,.2f} ({s['margin']:.1f}% margen)
         </div>
         """, unsafe_allow_html=True)
