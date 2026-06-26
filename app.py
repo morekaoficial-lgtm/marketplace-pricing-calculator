@@ -17,6 +17,7 @@ from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
 from io import BytesIO
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
 # CONFIGURACIÓN GOOGLE SHEETS — PESOS Y MEDIDAS
@@ -1150,9 +1151,59 @@ def fetch_meli_user_info(access_token):
     except Exception as e:
         return {"error": str(e)}
 
+def map_meli_listing_type(listing_type_id):
+    """Mapea listing_type_id de MELI a classic/premium local"""
+    if not listing_type_id:
+        return "classic"
+    # MELI usa: gold_special (Premium), gold_pro (Clásica premium), bronze, free, etc.
+    premium_types = ["gold_special", "gold_pro", "gold_premium"]
+    if listing_type_id in premium_types:
+        return "premium"
+    return "classic"
+
+def _fetch_single_item(access_token, item_id):
+    """Helper para obtener un item individual (usado en paralelo)"""
+    try:
+        item_r = requests.get(f"{MELI_API_BASE}/items/{item_id}", headers=get_meli_headers(access_token), timeout=10)
+        if item_r.status_code == 200:
+            item = item_r.json()
+            # SKU: priorizar SELLER_SKU, luego seller_custom_field, luego MODEL/SKU
+            sku = ""
+            if item.get("attributes"):
+                for attr in item.get("attributes", []):
+                    if attr.get("id") == "SELLER_SKU":
+                        sku = attr.get("value_name", "")
+                        break
+            if not sku:
+                sku = item.get("seller_custom_field", "")
+            if not sku and item.get("attributes"):
+                for attr in item.get("attributes", []):
+                    if attr.get("id") in ["MODEL", "SKU"]:
+                        sku = attr.get("value_name", "")
+                        break
+            return {
+                "id": item.get("id"),
+                "title": item.get("title", ""),
+                "price": item.get("price", 0),
+                "base_price": item.get("base_price", item.get("price", 0)),
+                "original_price": item.get("original_price"),
+                "available_quantity": item.get("available_quantity", 0),
+                "sold_quantity": item.get("sold_quantity", 0),
+                "status": item.get("status", ""),
+                "permalink": item.get("permalink", ""),
+                "thumbnail": item.get("thumbnail", ""),
+                "category_id": item.get("category_id", ""),
+                "listing_type_id": item.get("listing_type_id", ""),
+                "shipping": item.get("shipping", {}),
+                "sku": sku,
+            }
+    except:
+        pass
+    return None
+
 @st.cache_data(ttl=300)
 def fetch_meli_items(access_token, user_id, limit=50, offset=0, status="active", fetch_all=True):
-    """Obtiene items del seller desde MELI API con paginación automática"""
+    """Obtiene items del seller desde MELI API con paginación automática y requests paralelos"""
     try:
         all_items = []
         current_offset = 0
@@ -1176,52 +1227,13 @@ def fetch_meli_items(access_token, user_id, limit=50, offset=0, status="active",
             if not item_ids:
                 break
             
-            # Obtener detalles de cada item
-            for item_id in item_ids:
-                try:
-                    item_r = requests.get(f"{MELI_API_BASE}/items/{item_id}", headers=get_meli_headers(access_token), timeout=10)
-                    if item_r.status_code == 200:
-                        item = item_r.json()
-                        # SKU: priorizar SELLER_SKU, luego seller_custom_field, luego MODEL/SKU
-                        sku = ""
-                        if item.get("attributes"):
-                            for attr in item.get("attributes", []):
-                                if attr.get("id") == "SELLER_SKU":
-                                    sku = attr.get("value_name", "")
-                                    break
-                        if not sku:
-                            sku = item.get("seller_custom_field", "")
-                        if not sku and item.get("attributes"):
-                            for attr in item.get("attributes", []):
-                                if attr.get("id") in ["MODEL", "SKU"]:
-                                    sku = attr.get("value_name", "")
-                                    break
-                        # Obtener nombre de categoría y mapear a local
-                        category_id = item.get("category_id", "")
-                        meli_cat_name = get_meli_category_name(access_token, category_id)
-                        category_name = map_meli_category_to_local(meli_cat_name)
-                        
-                        all_items.append({
-                            "id": item.get("id"),
-                            "title": item.get("title", ""),
-                            "price": item.get("price", 0),
-                            "base_price": item.get("base_price", item.get("price", 0)),
-                            "original_price": item.get("original_price"),
-                            "available_quantity": item.get("available_quantity", 0),
-                            "sold_quantity": item.get("sold_quantity", 0),
-                            "status": item.get("status", ""),
-                            "permalink": item.get("permalink", ""),
-                            "thumbnail": item.get("thumbnail", ""),
-                            "category_id": category_id,
-                            "category_name": category_name,
-                            "meli_category_name": meli_cat_name,
-                            "listing_type_id": item.get("listing_type_id", ""),
-                            "shipping": item.get("shipping", {}),
-                            "sku": sku,
-                        })
-                    time.sleep(0.1)
-                except:
-                    continue
+            # Obtener detalles de cada item EN PARALELO (hasta 20 concurrentes)
+            with ThreadPoolExecutor(max_workers=20) as executor:
+                future_to_id = {executor.submit(_fetch_single_item, access_token, item_id): item_id for item_id in item_ids}
+                for future in as_completed(future_to_id):
+                    item = future.result()
+                    if item:
+                        all_items.append(item)
             
             # Check if we got all items
             if not fetch_all or len(all_items) >= total or len(item_ids) < limit:
@@ -1230,6 +1242,33 @@ def fetch_meli_items(access_token, user_id, limit=50, offset=0, status="active",
             current_offset += limit
             if current_offset >= total or current_offset >= (max_pages * limit):
                 break
+        
+        # Ahora resolver categorías en paralelo (solo las únicas)
+        unique_cat_ids = list({item["category_id"] for item in all_items if item.get("category_id")})
+        cat_cache = {}
+        
+        def _fetch_cat(cat_id):
+            try:
+                r = requests.get(f"{MELI_API_BASE}/categories/{cat_id}", headers=get_meli_headers(access_token), timeout=10)
+                if r.status_code == 200:
+                    return cat_id, r.json().get("name", "")
+            except:
+                pass
+            return cat_id, ""
+        
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_cat = {executor.submit(_fetch_cat, cat_id): cat_id for cat_id in unique_cat_ids}
+            for future in as_completed(future_to_cat):
+                cat_id, cat_name = future.result()
+                cat_cache[cat_id] = cat_name
+        
+        # Enriquecer items con categoría y listing_type
+        for item in all_items:
+            cat_id = item.get("category_id", "")
+            meli_cat_name = cat_cache.get(cat_id, "")
+            item["meli_category_name"] = meli_cat_name
+            item["category_name"] = map_meli_category_to_local(meli_cat_name)
+            item["listing_type"] = map_meli_listing_type(item.get("listing_type_id", ""))
         
         return all_items, None
     except Exception as e:
@@ -1387,144 +1426,129 @@ def calculate_meli_net_received(price, fees, shipping_cost):
 
 def calculate_meli_promo_discount(cost, current_price, target_margin_pct, category_name, listing_type="classic", has_rfc=True, peso_kg=0, largo_cm=0, ancho_cm=0, profundidad_cm=0):
     """
-    Calcula el descuento a aplicar para una promoción de MELI.
+    Calcula el descuento óptimo para una promoción de MELI con alta precisión.
     
-    target_margin_pct: margen deseado sobre el PAGO NETO que indica MELI
-    - 5% = 5% de utilidad sobre lo recibido
-    - 10% = 10% de ganancia sobre lo recibido
+    target_margin_pct: margen deseado sobre el PAGO NETO (ej: 0.05 = 5%)
     
-    Retorna descuento=0 si:
-    - El precio actual ya es insuficiente para el margen deseado
-    - No hay costo definido
+    Usa método de bisección + refinamiento para convergencia exacta.
     """
     # Validaciones básicas
     if cost <= 0 or current_price <= 0:
-        return {
-            "price_discounted": current_price,
-            "discount_pct": 0,
-            "original_price": current_price,
-            "net_received": 0,
-            "profit": 0,
-            "margin": 0,
-            "fees": {"total_fees": 0},
-            "shipping_cost": 0,
-            "target_net": 0,
-            "aplica": False,
-            "mensaje": "Sin costo definido"
-        }
+        return _promo_error(current_price, "Sin costo definido")
     
-    # Calcular pago neto objetivo
+    # Pago neto objetivo: costo / (1 - margen)
+    # Ej: costo=100, margen=5% → necesito recibir $105.26 para ganar 5%
     target_net = cost / (1 - target_margin_pct)
     
-    # Primero, calcular el pago neto AL PRECIO ACTUAL (sin descuento)
+    # --- PASO 1: Evaluar precio actual (sin descuento) ---
     fees_actual = calculate_ml_fees(current_price, category_name, listing_type, has_rfc)
     shipping_actual = get_ml_shipping_cost(current_price, peso_kg, largo_cm, ancho_cm, profundidad_cm)
     net_actual = calculate_meli_net_received(current_price, fees_actual, shipping_actual)
     profit_actual = net_actual - cost
     margin_actual = (profit_actual / net_actual) * 100 if net_actual > 0 else -999
     
-    # Si al precio actual ya hay pérdida o margen insuficiente, no se puede hacer descuento
+    # Si ya hay pérdida al precio actual
     if profit_actual <= 0:
-        return {
-            "price_discounted": current_price,
-            "discount_pct": 0,
-            "original_price": current_price,
-            "net_received": round(net_actual, 2),
-            "profit": round(profit_actual, 2),
-            "margin": round(margin_actual, 2),
-            "fees": fees_actual,
-            "shipping_cost": round(shipping_actual, 2),
-            "target_net": round(target_net, 2),
-            "aplica": False,
-            "mensaje": f"Pérdida actual (${profit_actual:,.2f}). No aplica descuento."
-        }
+        return _promo_error(current_price, f"Pérdida actual (${profit_actual:,.2f}). No aplica descuento.", net_actual, profit_actual, margin_actual, fees_actual, shipping_actual, target_net)
     
-    # Si al precio actual el margen ya es menor al deseado, no se puede hacer descuento
-    if margin_actual < (target_margin_pct * 100):
-        return {
-            "price_discounted": current_price,
-            "discount_pct": 0,
-            "original_price": current_price,
-            "net_received": round(net_actual, 2),
-            "profit": round(profit_actual, 2),
-            "margin": round(margin_actual, 2),
-            "fees": fees_actual,
-            "shipping_cost": round(shipping_actual, 2),
-            "target_net": round(target_net, 2),
-            "aplica": False,
-            "mensaje": f"Margen actual {margin_actual:.1f}% < {target_margin_pct*100:.0f}% objetivo. No aplica descuento."
-        }
+    # Si el margen actual ya es menor al objetivo
+    if margin_actual < (target_margin_pct * 100 - 0.01):  # tolerancia 0.01%
+        return _promo_error(current_price, f"Margen actual {margin_actual:.2f}% < {target_margin_pct*100:.0f}% objetivo. No aplica descuento.", net_actual, profit_actual, margin_actual, fees_actual, shipping_actual, target_net)
     
-    # Calcular precio con descuento que dé exactamente target_net
-    price_discounted = current_price
-    for _ in range(50):
+    # --- PASO 2: Buscar precio con descuento usando BISECCIÓN ---
+    # Sabemos que: precio=current_price → net >= target_net (ya validamos)
+    # Necesitamos encontrar el precio más bajo donde net >= target_net
+    # Pero no puede ser menor a costo (obvio)
+    
+    low = max(cost * 1.05, cost + 10)   # precio mínimo razonable
+    high = current_price                # precio máximo = actual
+    
+    best_price = current_price
+    best_margin = margin_actual
+    
+    for _ in range(60):  # 60 iteraciones = precisión extrema
+        mid = (low + high) / 2
+        fees_mid = calculate_ml_fees(mid, category_name, listing_type, has_rfc)
+        shipping_mid = get_ml_shipping_cost(mid, peso_kg, largo_cm, ancho_cm, profundidad_cm)
+        net_mid = calculate_meli_net_received(mid, fees_mid, shipping_mid)
+        profit_mid = net_mid - cost
+        margin_mid = (profit_mid / net_mid) * 100 if net_mid > 0 else -999
+        
+        # Si el pago neto alcanza el objetivo Y hay ganancia
+        if net_mid >= target_net and profit_mid > 0:
+            best_price = mid
+            best_margin = margin_mid
+            high = mid  # Podemos bajar más
+        else:
+            low = mid   # Necesitamos subir
+        
+        if abs(high - low) < 0.01:
+            break
+    
+    # --- PASO 3: Refinar con iteración proporcional ---
+    price_discounted = best_price
+    for _ in range(30):
         fees = calculate_ml_fees(price_discounted, category_name, listing_type, has_rfc)
         shipping = get_ml_shipping_cost(price_discounted, peso_kg, largo_cm, ancho_cm, profundidad_cm)
         net_received = calculate_meli_net_received(price_discounted, fees, shipping)
         
-        if abs(net_received - target_net) < 0.5:
+        if abs(net_received - target_net) < 0.01:
             break
         
-        if net_received > 0:
+        if net_received > 0 and net_received >= target_net:
+            # Podemos bajar un poco más
             adjustment = target_net / net_received
-            price_discounted = price_discounted * adjustment
+            price_discounted = price_discounted * max(adjustment, 0.999)  # no bajar demasiado rápido
         else:
-            price_discounted = price_discounted * 1.1
+            # Nos pasamos, subir
+            price_discounted = price_discounted * 1.001
     
-    # Validar que el precio con descuento sea menor al actual y mantenga margen
-    fees = calculate_ml_fees(price_discounted, category_name, listing_type, has_rfc)
-    shipping = get_ml_shipping_cost(price_discounted, peso_kg, largo_cm, ancho_cm, profundidad_cm)
-    net_received = calculate_meli_net_received(price_discounted, fees, shipping)
-    profit = net_received - cost
-    margin = (profit / net_received) * 100 if net_received > 0 else 0
+    # --- PASO 4: Validación final exhaustiva ---
+    fees_final = calculate_ml_fees(price_discounted, category_name, listing_type, has_rfc)
+    shipping_final = get_ml_shipping_cost(price_discounted, peso_kg, largo_cm, ancho_cm, profundidad_cm)
+    net_final = calculate_meli_net_received(price_discounted, fees_final, shipping_final)
+    profit_final = net_final - cost
+    margin_final = (profit_final / net_final) * 100 if net_final > 0 else 0
     
-    # Si el precio con descuento >= precio actual, no hay descuento posible
-    if price_discounted >= current_price:
-        return {
-            "price_discounted": current_price,
-            "discount_pct": 0,
-            "original_price": current_price,
-            "net_received": round(net_actual, 2),
-            "profit": round(profit_actual, 2),
-            "margin": round(margin_actual, 2),
-            "fees": fees_actual,
-            "shipping_cost": round(shipping_actual, 2),
-            "target_net": round(target_net, 2),
-            "aplica": False,
-            "mensaje": f"Precio actual insuficiente. Necesita ${price_discounted:,.2f} para {target_margin_pct*100:.0f}% margen."
-        }
+    # Si no hay ganancia o el margen es menor al objetivo, rechazar
+    if profit_final <= 0 or margin_final < (target_margin_pct * 100 - 0.05):
+        return _promo_error(current_price, f"Margen calculado {margin_final:.2f}% < {target_margin_pct*100:.0f}% objetivo. No aplica.", net_actual, profit_actual, margin_actual, fees_actual, shipping_actual, target_net)
     
-    # Si hay pérdida con el descuento calculado
-    if profit < 0:
-        return {
-            "price_discounted": current_price,
-            "discount_pct": 0,
-            "original_price": current_price,
-            "net_received": round(net_actual, 2),
-            "profit": round(profit_actual, 2),
-            "margin": round(margin_actual, 2),
-            "fees": fees_actual,
-            "shipping_cost": round(shipping_actual, 2),
-            "target_net": round(target_net, 2),
-            "aplica": False,
-            "mensaje": "Descuento calcularía pérdida. No aplica."
-        }
+    # Si el precio con descuento >= precio actual
+    if price_discounted >= current_price * 0.999:
+        return _promo_error(current_price, f"Precio actual insuficiente. Necesita ${price_discounted:,.2f} para {target_margin_pct*100:.0f}% margen.", net_actual, profit_actual, margin_actual, fees_actual, shipping_actual, target_net)
     
-    # Todo OK, calcular descuento
+    # --- PASO 5: Todo OK, calcular descuento ---
     discount_pct = ((current_price - price_discounted) / current_price) * 100
     
     return {
         "price_discounted": round(price_discounted, 2),
-        "discount_pct": round(discount_pct, 1),
+        "discount_pct": round(discount_pct, 2),
         "original_price": current_price,
-        "net_received": round(net_received, 2),
-        "profit": round(profit, 2),
-        "margin": round(margin, 2),
-        "fees": fees,
-        "shipping_cost": round(shipping, 2),
+        "net_received": round(net_final, 2),
+        "profit": round(profit_final, 2),
+        "margin": round(margin_final, 2),
+        "fees": fees_final,
+        "shipping_cost": round(shipping_final, 2),
         "target_net": round(target_net, 2),
         "aplica": True,
-        "mensaje": f"Descuento sugerido: {discount_pct:.1f}% | Margen: {margin:.1f}%"
+        "mensaje": f"Descuento: {discount_pct:.1f}% | Margen: {margin_final:.2f}%"
+    }
+
+def _promo_error(current_price, mensaje, net_actual=0, profit_actual=0, margin_actual=0, fees_actual=None, shipping_actual=0, target_net=0):
+    """Helper para retornar estado de error en descuento"""
+    return {
+        "price_discounted": current_price,
+        "discount_pct": 0,
+        "original_price": current_price,
+        "net_received": round(net_actual, 2),
+        "profit": round(profit_actual, 2),
+        "margin": round(margin_actual, 2),
+        "fees": fees_actual or {"total_fees": 0},
+        "shipping_cost": round(shipping_actual, 2),
+        "target_net": round(target_net, 2),
+        "aplica": False,
+        "mensaje": mensaje,
     }
 
 # ============================================================
@@ -2344,13 +2368,9 @@ with tab4:
         target_margin = 0.05 if promo_margin == "5% Utilidad" else 0.10
     
     with config_col2:
-        promo_listing_type = st.radio(
-            "Tipo de publicación",
-            ["classic", "premium"],
-            format_func=lambda x: "Clásica" if x == "classic" else "Premium",
-            key="promo_listing"
-        )
-        st.info("📂 La categoría se detecta automáticamente desde MELI por producto")
+        st.markdown("**Tipo de publicación:**")
+        st.markdown("<div style='font-size: 0.85rem; color: #666;'>🤖 Detectado automáticamente desde MELI por cada producto</div>", unsafe_allow_html=True)
+        st.info("📂 La categoría también se detecta automáticamente desde MELI")
     
     with config_col3:
         promo_has_rfc = st.checkbox("Tengo RFC registrado", value=has_rfc, key="promo_rfc")
@@ -2446,6 +2466,7 @@ with tab4:
                 "ID MELI": item.get("id"),
                 "Producto": item.get("title", ""),
                 "SKU MELI": item.get("sku", ""),
+                "Tipo Pub": "Premium" if item.get("listing_type") == "premium" else "Clásica",
                 "Precio Base": item.get("price", 0),
                 "Costo Shopify": shopify_cost_map.get(str(item.get("sku", "")).strip().upper(), {}).get("costo", 0) or 0,
                 "Costo Final": shopify_cost_map.get(str(item.get("sku", "")).strip().upper(), {}).get("costo", 0) or 0,
@@ -2461,6 +2482,7 @@ with tab4:
                 "ID MELI": st.column_config.TextColumn("ID MELI", disabled=True),
                 "Producto": st.column_config.TextColumn("Producto", disabled=True, width="large"),
                 "SKU MELI": st.column_config.TextColumn("SKU MELI", disabled=True),
+                "Tipo Pub": st.column_config.TextColumn("Tipo Pub", disabled=True),
                 "Precio Base": st.column_config.NumberColumn("Precio Base", disabled=True, format="$%.2f"),
                 "Costo Shopify": st.column_config.NumberColumn("Costo Shopify", disabled=True, format="$%.2f"),
                 "Costo Final": st.column_config.NumberColumn("Costo Final (editable)", min_value=0, step=10.0, format="$%.2f"),
@@ -2480,6 +2502,9 @@ with tab4:
         if calcular_todos:
             with st.spinner("Calculando descuentos óptimos..."):
                 resultados_promo = []
+                
+                # Diccionario rápido para lookup de items MELI (evita O(n²))
+                meli_lookup = {item.get("id"): item for item in meli_items}
                 
                 for _, row in edited_df.iterrows():
                     costo = row["Costo Final"]
@@ -2508,12 +2533,11 @@ with tab4:
                         })
                         continue
                     
-                    # Buscar peso, medidas y categoría del item
+                    # Buscar peso, medidas desde Shopify
                     peso_kg = 0
                     largo_cm = 0
                     ancho_cm = 0
                     profundidad_cm = 0
-                    item_category = "Custom"
                     item_sku = str(sku).strip().upper()
                     if item_sku in shopify_cost_map:
                         info = shopify_cost_map[item_sku]
@@ -2522,11 +2546,10 @@ with tab4:
                         ancho_cm = info.get("ancho_cm", 0)
                         profundidad_cm = info.get("profundidad_cm", 0)
                     
-                    # Buscar categoría del item desde MELI
-                    for meli_item in meli_items:
-                        if meli_item.get("id") == meli_id:
-                            item_category = meli_item.get("category_name", "Custom")
-                            break
+                    # Obtener categoría y tipo de publicación desde MELI (lookup O(1))
+                    meli_item = meli_lookup.get(meli_id, {})
+                    item_category = meli_item.get("category_name", "Custom")
+                    item_listing_type = meli_item.get("listing_type", "classic")
                     
                     # Calcular descuento óptimo
                     resultado = calculate_meli_promo_discount(
@@ -2534,7 +2557,7 @@ with tab4:
                         current_price=current_price,
                         target_margin_pct=target_margin,
                         category_name=item_category,
-                        listing_type=promo_listing_type,
+                        listing_type=item_listing_type,
                         has_rfc=promo_has_rfc,
                         peso_kg=peso_kg,
                         largo_cm=largo_cm,
