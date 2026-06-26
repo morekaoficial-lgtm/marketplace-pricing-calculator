@@ -21,6 +21,11 @@ from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
+# VERSIÓN DEL ARCHIVO (para debug de caché)
+# ============================================================
+APP_VERSION = "2026-06-27-v3"
+
+# ============================================================
 # CONFIGURACIÓN GOOGLE SHEETS — PESOS Y MEDIDAS
 # ============================================================
 GSHEETS_SCOPES = [
@@ -962,6 +967,7 @@ def fetch_shopify_products():
 # ============================================================
 with st.sidebar:
     st.markdown("### 🛒 Producto desde Shopify")
+    st.caption(f"v{APP_VERSION}")
     st.markdown("Selecciona un producto para cargar peso, dimensiones y costo automáticamente.")
     
     # Cargar productos desde Shopify
@@ -2848,7 +2854,14 @@ with tab4:
                     if meli_token and meli_user:
                         with st.spinner("Cargando promociones disponibles..."):
                             meli_user_id = meli_user.get("id", "")
-                            promociones_por_item = fetch_all_items_promotions(meli_token, items_meli, meli_user_id)
+                            
+                            # Defensa contra caché de Streamlit Cloud
+                            try:
+                                promociones_por_item = fetch_all_items_promotions(meli_token, items_meli, meli_user_id)
+                            except NameError as e:
+                                st.error(f"❌ Error de carga (caché): {e}")
+                                st.info("🔄 Intentá recargar la app con Ctrl+Shift+R o reiniciá desde 'Manage app'")
+                                promociones_por_item = {}
                             
                             if isinstance(promociones_por_item, dict) and "error" in promociones_por_item:
                                 st.error(f"❌ Error al cargar promociones: {promociones_por_item['error']}")
