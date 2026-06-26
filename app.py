@@ -130,49 +130,54 @@ def get_billable_weight(peso_real, largo, ancho, profundidad):
 # TARIFAS DE ENVÍO MERCADO LIBRE MÉXICO — ABRIL 2026
 # Productos < $299: costo variable por peso
 # ============================================================
-def get_ml_shipping_cost(price, peso_kg, largo, ancho, profundidad):
+def get_ml_shipping_cost(price, peso_kg, largo, ancho, profundidad, free_shipping=False):
     """
-    Calcula costo de envío de Mercado Libre México basado en peso y dimensiones.
+    Calcula costo de envío de Mercado Libre México — Abril 2026.
     
-    Reglas ML México (Abril 2026):
-    - Precio >= $299: Envío GRATIS → vendedor paga el costo (tabla "free")
-    - Precio < $299: Envío lo paga el COMPRADOR → costo $0 para vendedor
-      (El comprador ve el costo de envío en checkout, pero no afecta ganancia del vendedor)
+    REGLAS ACTUALES (desde 6 abril 2026):
+    - Productos < $299: El vendedor paga un "costo de servicio de envío" variable por peso,
+      AUNQUE el comprador pague el envío en checkout.
+    - Productos >= $299: Envío gratis → vendedor paga el costo completo.
+    - Si el producto tiene free_shipping=True (aunque sea < $299): vendedor paga tabla "free".
     
     Args:
-        price: Precio del producto (precio con descuento aplicado)
-        peso_kg, largo, ancho, profundidad: Dimensiones para calcular peso facturable
+        price: Precio del producto
+        peso_kg, largo, ancho, profundidad: Dimensiones
+        free_shipping: True si la publicación tiene envío gratis activado
     
     Returns:
-        float: Costo de envío para el VENDEDOR ($0 si comprador lo paga)
+        float: Costo de envío para el VENDEDOR
     """
-    if price < 299:
-        # El comprador paga el envío → $0 costo para vendedor
-        return 0
-    
-    # Envío gratis: vendedor paga el costo
     billable_weight = get_billable_weight(peso_kg, largo, ancho, profundidad)
-    return calculate_ml_shipping_table(billable_weight, 0)  # 0 = usar tabla free
+    
+    if free_shipping:
+        # Vendedor ofrece envío gratis → paga tabla completa
+        return calculate_ml_shipping_table(billable_weight, price_range="free")
+    
+    if price >= 299:
+        # Producto >= $299 con envío gratis obligatorio
+        return calculate_ml_shipping_table(billable_weight, price_range="free")
+    
+    # Producto < $299: vendedor paga "costo de servicio de envío" (tabla por rango de precio)
+    if price < 99:
+        price_range = "low"      # $0 - $98.99
+    elif price < 199:
+        price_range = "mid"      # $99 - $198.99
+    else:
+        price_range = "high"     # $199 - $298.99
+    
+    return calculate_ml_shipping_table(billable_weight, price_range)
 
-def calculate_ml_shipping_table(peso_kg, price):
+def calculate_ml_shipping_table(peso_kg, price_range="low"):
     """Tabla de costos de envío ML México — Abril 2026
     
     Fuente: https://www.profitosapp.com/blog/cambios-mercado-envios-full-mexico-abril-2026
     Verificado 7 de abril de 2026 en mercadolibre.com.mx
     
-    Productos < $299: costo variable por peso (ya no es fijo)
-    Productos >= $299: envío gratis, vendedor paga el costo completo del envío
+    Desde el 6 de abril 2026:
+    - Productos < $299: costo variable por peso según rango de precio (servicio de envío)
+    - Productos >= $299 o free_shipping: vendedor paga costo completo (tabla "free")
     """
-    
-    # Determinar rango de precio
-    if price < 99:
-        price_range = "low"
-    elif price < 199:
-        price_range = "mid"
-    elif price < 299:
-        price_range = "high"
-    else:
-        price_range = "free"
     
     # Tabla de costos por peso (MXN) — desde 6 de abril 2026
     # Productos menores a $299: costo variable por peso
@@ -607,13 +612,14 @@ def calculate_ml_fees(price, category_name, listing_type="classic", has_rfc=True
         "net_received": price - total_fees,
     }
 
-def calculate_ml_base_price(cost, target_margin, discount_pct, category_name, listing_type="classic", has_rfc=True, shipping_cost=0, ad_cost_pct=0.10, peso_kg=0, largo_cm=0, ancho_cm=0, profundidad_cm=0):
+def calculate_ml_base_price(cost, target_margin, discount_pct, category_name, listing_type="classic", has_rfc=True, shipping_cost=0, ad_cost_pct=0.10, peso_kg=0, largo_cm=0, ancho_cm=0, profundidad_cm=0, free_shipping=False):
     """Calcula el precio BASE necesario para que el precio con descuento mantenga el margen deseado.
     Incluye costo de publicidad como % del precio de venta y envío basado en peso/dimensiones.
     
-    Envío ML México:
-    - Precio con descuento < $299: envío lo paga el COMPRADOR → costo $0 para vendedor
-    - Precio con descuento >= $299: envío gratis → vendedor paga el costo (tabla free)
+    Envío ML México (Abril 2026):
+    - Productos < $299: vendedor paga costo de servicio de envío (tabla por peso/rango)
+    - Productos >= $299: envío gratis → vendedor paga costo completo
+    - free_shipping=True: vendedor paga costo completo sin importar precio
     """
     
     price_discounted = cost * 2.5  # Estimación inicial
@@ -621,15 +627,14 @@ def calculate_ml_base_price(cost, target_margin, discount_pct, category_name, li
     for _ in range(30):
         ad_cost = price_discounted * ad_cost_pct
         
-        # Calcular envío: solo si precio con descuento >= $299 (envío gratis)
-        if price_discounted >= 299:
-            if peso_kg > 0:
-                shipping = get_ml_shipping_cost(price_discounted, peso_kg, largo_cm, ancho_cm, profundidad_cm)
-            else:
-                shipping = shipping_cost
+        # Calcular envío según reglas actuales
+        if peso_kg > 0 or largo_cm > 0 or ancho_cm > 0 or profundidad_cm > 0:
+            shipping = get_ml_shipping_cost(price_discounted, peso_kg, largo_cm, ancho_cm, profundidad_cm, free_shipping)
+        elif free_shipping or price_discounted >= 299:
+            shipping = shipping_cost if shipping_cost > 0 else price_discounted * 0.18
         else:
-            # Envío lo paga el comprador → $0 costo para vendedor
-            shipping = 0
+            # Sin datos de medidas y sin envío gratis: estimar costo de servicio
+            shipping = price_discounted * 0.08
         
         total_cost = cost + ad_cost + shipping
         
@@ -646,26 +651,24 @@ def calculate_ml_base_price(cost, target_margin, discount_pct, category_name, li
     
     return round(price_base, 2), round(price_discounted, 2)
 
-def calculate_ml_from_fixed_base(cost, base_price, discount_pct, category_name, listing_type="classic", has_rfc=True, shipping_cost=0, ad_cost_pct=0.10, peso_kg=0, largo_cm=0, ancho_cm=0, profundidad_cm=0):
+def calculate_ml_from_fixed_base(cost, base_price, discount_pct, category_name, listing_type="classic", has_rfc=True, shipping_cost=0, ad_cost_pct=0.10, peso_kg=0, largo_cm=0, ancho_cm=0, profundidad_cm=0, free_shipping=False):
     """Desde un precio base FIJO, calcula ganancia con un % de descuento dado. Incluye publicidad y envío por peso.
     
-    Envío ML México:
-    - Precio con descuento < $299: envío lo paga el COMPRADOR → costo $0 para vendedor
-    - Precio con descuento >= $299: envío gratis → vendedor paga el costo (tabla free)
+    Envío ML México (Abril 2026):
+    - Productos < $299: vendedor paga costo de servicio de envío
+    - Productos >= $299: envío gratis → vendedor paga costo completo
     """
     price_discounted = base_price * (1 - discount_pct)
     
     ad_cost = price_discounted * ad_cost_pct
     
-    # Calcular envío: solo si precio con descuento >= $299 (envío gratis)
-    if price_discounted >= 299:
-        if peso_kg > 0:
-            shipping = get_ml_shipping_cost(price_discounted, peso_kg, largo_cm, ancho_cm, profundidad_cm)
-        else:
-            shipping = shipping_cost
+    # Calcular envío según reglas actuales
+    if peso_kg > 0 or largo_cm > 0 or ancho_cm > 0 or profundidad_cm > 0:
+        shipping = get_ml_shipping_cost(price_discounted, peso_kg, largo_cm, ancho_cm, profundidad_cm, free_shipping)
+    elif free_shipping or price_discounted >= 299:
+        shipping = shipping_cost if shipping_cost > 0 else price_discounted * 0.18
     else:
-        # Envío lo paga el comprador → $0 costo para vendedor
-        shipping = 0
+        shipping = price_discounted * 0.08
     
     total_cost = cost + ad_cost + shipping
     
@@ -1444,16 +1447,14 @@ def calculate_meli_promo_discount(cost, current_price, target_margin_pct, catego
     """
     # Helper interno para calcular envío basado en config real del producto
     def _get_shipping_for_price(price):
-        if free_shipping:
-            # Vendedor paga el envío - calcular según peso/medidas
-            if peso_kg > 0 or largo_cm > 0:
-                return get_ml_shipping_cost(price, peso_kg, largo_cm, ancho_cm, profundidad_cm)
-            else:
-                # Sin datos de peso/medidas, estimar 15% del precio para envío
-                return price * 0.15
+        if peso_kg > 0 or largo_cm > 0 or ancho_cm > 0 or profundidad_cm > 0:
+            return get_ml_shipping_cost(price, peso_kg, largo_cm, ancho_cm, profundidad_cm, free_shipping=free_shipping)
         else:
-            # Envío lo paga el comprador → $0 costo para vendedor
-            return 0
+            # Sin datos de peso/medidas, estimar según rango
+            if free_shipping or price >= 299:
+                return price * 0.18  # Envío gratis ~18%
+            else:
+                return price * 0.08  # Costo de servicio ~8%
     # Validaciones básicas
     if cost <= 0 or current_price <= 0:
         return _promo_error(current_price, "Sin costo definido")
