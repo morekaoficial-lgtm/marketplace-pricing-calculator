@@ -1182,11 +1182,18 @@ def fetch_meli_items(access_token, user_id, limit=50, offset=0, status="active",
                     item_r = requests.get(f"{MELI_API_BASE}/items/{item_id}", headers=get_meli_headers(access_token), timeout=10)
                     if item_r.status_code == 200:
                         item = item_r.json()
-                        # SKU puede estar en seller_custom_field o en atributos
-                        sku = item.get("seller_custom_field", "")
+                        # SKU: priorizar SELLER_SKU, luego seller_custom_field, luego MODEL/SKU
+                        sku = ""
+                        if item.get("attributes"):
+                            for attr in item.get("attributes", []):
+                                if attr.get("id") == "SELLER_SKU":
+                                    sku = attr.get("value_name", "")
+                                    break
+                        if not sku:
+                            sku = item.get("seller_custom_field", "")
                         if not sku and item.get("attributes"):
                             for attr in item.get("attributes", []):
-                                if attr.get("id") in ["SELLER_SKU", "MODEL", "SKU"]:
+                                if attr.get("id") in ["MODEL", "SKU"]:
                                     sku = attr.get("value_name", "")
                                     break
                         all_items.append({
