@@ -2529,6 +2529,7 @@ with tab4:
         if calcular_todos:
             with st.spinner("Calculando descuentos óptimos..."):
                 resultados_promo = []
+                productos_sin_costo = []  # ← NUEVO: productos sin costo definido
                 
                 # Diccionario rápido para lookup de items MELI (evita O(n²))
                 meli_lookup = {item.get("id"): item for item in meli_items}
@@ -2539,27 +2540,25 @@ with tab4:
                     meli_id = row["ID MELI"]
                     sku = row["SKU MELI"]
                     title = row["Producto"]
+                    tipo_pub = row["Tipo Pub"]
+                    envio_tipo = row["Envío"]
+                    stock = row["Stock"]
                     
+                    # ── Productos SIN COSTO ──────────────────────────────
                     if costo <= 0:
-                        resultados_promo.append({
+                        productos_sin_costo.append({
                             "meli_id": meli_id,
                             "sku": sku,
                             "title": title,
                             "current_price": current_price,
-                            "costo": 0,
-                            "precio_promo": 0,
-                            "descuento_pct": 0,
-                            "descuento_monto": 0,
-                            "comisiones": 0,
-                            "envio": 0,
-                            "pago_neto": 0,
-                            "ganancia": 0,
-                            "margen_sobre_neto": 0,
-                            "aplicar": False,
-                            "estado": "❌ Sin costo",
+                            "tipo_pub": tipo_pub,
+                            "envio": envio_tipo,
+                            "stock": stock,
+                            "costo_sugerido": "",  # columna vacía para que usuario llene
                         })
                         continue
                     
+                    # ── Productos CON COSTO ──────────────────────────────
                     # Buscar peso, medidas desde Shopify
                     peso_kg = 0
                     largo_cm = 0
@@ -2612,17 +2611,20 @@ with tab4:
                         "estado": resultado.get("mensaje", "—"),
                     })
                 
+                # ============================================================
+                # MOSTRAR RESULTADOS — SOLO PRODUCTOS CON COSTO
+                # ============================================================
                 if resultados_promo:
-                    st.success(f"✅ Cálculo completado para {len(resultados_promo)} productos")
+                    st.success(f"✅ {len(resultados_promo)} productos con costo calculados")
                     
-                    # Mostrar tabla de resultados
+                    # Mostrar tabla de resultados (solo con costo)
                     df_resultados = pd.DataFrame([
                         {
                             "ID MELI": r["meli_id"],
                             "SKU": r["sku"] or "—",
                             "Producto": r["title"][:35] + "..." if len(r["title"]) > 35 else r["title"],
                             "Precio Base": f"${r['current_price']:,.2f}",
-                            "Costo": f"${r['costo']:,.2f}" if r['costo'] > 0 else "—",
+                            "Costo": f"${r['costo']:,.2f}",
                             "Precio Promo": f"${r['precio_promo']:,.2f}" if r['precio_promo'] > 0 else "—",
                             "Descuento %": f"{r['descuento_pct']:.1f}%" if r['descuento_pct'] > 0 else "—",
                             "Pago Neto": f"${r['pago_neto']:,.2f}" if r['pago_neto'] > 0 else "—",
@@ -2636,9 +2638,9 @@ with tab4:
                     st.dataframe(df_resultados, use_container_width=True, hide_index=True, height=600)
                     
                     # ============================================================
-                    # EXPORTAR A EXCEL
+                    # EXPORTAR A EXCEL — SOLO CON COSTO
                     # ============================================================
-                    st.markdown("### 📥 Exportar a Excel")
+                    st.markdown("### 📥 Exportar a Excel (productos con costo)")
                     
                     try:
                         excel_buffer = BytesIO()
@@ -2655,7 +2657,7 @@ with tab4:
                         
                         excel_buffer.seek(0)
                         st.download_button(
-                            "📊 Descargar Excel",
+                            "📊 Descargar Excel (con costo)",
                             excel_buffer.getvalue(),
                             f"promociones_meli_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -2665,11 +2667,57 @@ with tab4:
                         csv_buffer = io.StringIO()
                         pd.DataFrame(resultados_promo).to_csv(csv_buffer, index=False)
                         st.download_button(
-                            "📄 Descargar CSV",
+                            "📄 Descargar CSV (con costo)",
                             csv_buffer.getvalue(),
                             f"promociones_meli_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
                             "text/csv"
                         )
+                    
+                    # ============================================================
+                    # PRODUCTOS SIN COSTO — TABLA + EXCEL SEPARADO
+                    # ============================================================
+                    if productos_sin_costo:
+                        st.markdown("---")
+                        st.warning(f"⚠️ {len(productos_sin_costo)} productos SIN COSTO definido")
+                        
+                        # Mostrar tabla resumen
+                        df_sin_costo = pd.DataFrame([
+                            {
+                                "ID MELI": p["meli_id"],
+                                "SKU": p["sku"] or "—",
+                                "Producto": p["title"][:40] + "..." if len(p["title"]) > 40 else p["title"],
+                                "Precio Base": f"${p['current_price']:,.2f}",
+                                "Tipo Pub": p["tipo_pub"],
+                                "Envío": p["envio"],
+                                "Stock": p["stock"],
+                            }
+                            for p in productos_sin_costo
+                        ])
+                        
+                        st.dataframe(df_sin_costo, use_container_width=True, hide_index=True, height=min(len(productos_sin_costo)*45, 400))
+                        
+                        # Exportar Excel de productos sin costo
+                        st.markdown("### 📥 Exportar Excel — Productos Sin Costo")
+                        st.caption("Incluye columna 'Costo Sugerido' vacía para que completes y reimportes.")
+                        
+                        try:
+                            excel_sc_buffer = BytesIO()
+                            df_sc_export = pd.DataFrame(productos_sin_costo)
+                            df_sc_export.columns = ["ID MELI", "SKU", "Producto", "Precio Base", 
+                                                     "Tipo Pub", "Envío", "Stock", "Costo Sugerido"]
+                            
+                            with pd.ExcelWriter(excel_sc_buffer, engine='openpyxl') as writer:
+                                df_sc_export.to_excel(writer, sheet_name='Sin_Costo', index=False)
+                            
+                            excel_sc_buffer.seek(0)
+                            st.download_button(
+                                "📋 Descargar Excel (sin costo)",
+                                excel_sc_buffer.getvalue(),
+                                f"productos_sin_costo_meli_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            )
+                        except Exception as e:
+                            st.warning(f"⚠️ No se pudo generar Excel: {e}")
                     
                     # ============================================================
                     # APLICACIÓN MASIVA
