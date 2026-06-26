@@ -1181,6 +1181,12 @@ def _fetch_single_item(access_token, item_id):
                     if attr.get("id") in ["MODEL", "SKU"]:
                         sku = attr.get("value_name", "")
                         break
+            # Extraer info de envío desde el objeto shipping de MELI
+            shipping_info = item.get("shipping", {})
+            free_shipping = shipping_info.get("free_shipping", False)
+            shipping_mode = shipping_info.get("mode", "")
+            shipping_tags = shipping_info.get("tags", [])
+            
             return {
                 "id": item.get("id"),
                 "title": item.get("title", ""),
@@ -1194,7 +1200,10 @@ def _fetch_single_item(access_token, item_id):
                 "thumbnail": item.get("thumbnail", ""),
                 "category_id": item.get("category_id", ""),
                 "listing_type_id": item.get("listing_type_id", ""),
-                "shipping": item.get("shipping", {}),
+                "shipping": shipping_info,
+                "free_shipping": free_shipping,
+                "shipping_mode": shipping_mode,
+                "shipping_tags": shipping_tags,
                 "sku": sku,
             }
     except:
@@ -1424,14 +1433,27 @@ def calculate_meli_net_received(price, fees, shipping_cost):
     """Calcula el pago neto que MELI muestra: precio - comisiones - envío"""
     return price - fees["total_fees"] - shipping_cost
 
-def calculate_meli_promo_discount(cost, current_price, target_margin_pct, category_name, listing_type="classic", has_rfc=True, peso_kg=0, largo_cm=0, ancho_cm=0, profundidad_cm=0):
+def calculate_meli_promo_discount(cost, current_price, target_margin_pct, category_name, listing_type="classic", has_rfc=True, peso_kg=0, largo_cm=0, ancho_cm=0, profundidad_cm=0, free_shipping=False):
     """
     Calcula el descuento óptimo para una promoción de MELI con alta precisión.
     
     target_margin_pct: margen deseado sobre el PAGO NETO (ej: 0.05 = 5%)
+    free_shipping: True si el producto tiene envío gratis configurado en MELI
     
     Usa método de bisección + refinamiento para convergencia exacta.
     """
+    # Helper interno para calcular envío basado en config real del producto
+    def _get_shipping_for_price(price):
+        if free_shipping:
+            # Vendedor paga el envío - calcular según peso/medidas
+            if peso_kg > 0 or largo_cm > 0:
+                return get_ml_shipping_cost(price, peso_kg, largo_cm, ancho_cm, profundidad_cm)
+            else:
+                # Sin datos de peso/medidas, estimar 15% del precio para envío
+                return price * 0.15
+        else:
+            # Envío lo paga el comprador → $0 costo para vendedor
+            return 0
     # Validaciones básicas
     if cost <= 0 or current_price <= 0:
         return _promo_error(current_price, "Sin costo definido")
@@ -1442,7 +1464,7 @@ def calculate_meli_promo_discount(cost, current_price, target_margin_pct, catego
     
     # --- PASO 1: Evaluar precio actual (sin descuento) ---
     fees_actual = calculate_ml_fees(current_price, category_name, listing_type, has_rfc)
-    shipping_actual = get_ml_shipping_cost(current_price, peso_kg, largo_cm, ancho_cm, profundidad_cm)
+    shipping_actual = _get_shipping_for_price(current_price)
     net_actual = calculate_meli_net_received(current_price, fees_actual, shipping_actual)
     profit_actual = net_actual - cost
     margin_actual = (profit_actual / net_actual) * 100 if net_actual > 0 else -999
@@ -1469,7 +1491,7 @@ def calculate_meli_promo_discount(cost, current_price, target_margin_pct, catego
     for _ in range(60):  # 60 iteraciones = precisión extrema
         mid = (low + high) / 2
         fees_mid = calculate_ml_fees(mid, category_name, listing_type, has_rfc)
-        shipping_mid = get_ml_shipping_cost(mid, peso_kg, largo_cm, ancho_cm, profundidad_cm)
+        shipping_mid = _get_shipping_for_price(mid)
         net_mid = calculate_meli_net_received(mid, fees_mid, shipping_mid)
         profit_mid = net_mid - cost
         margin_mid = (profit_mid / net_mid) * 100 if net_mid > 0 else -999
@@ -1489,7 +1511,7 @@ def calculate_meli_promo_discount(cost, current_price, target_margin_pct, catego
     price_discounted = best_price
     for _ in range(30):
         fees = calculate_ml_fees(price_discounted, category_name, listing_type, has_rfc)
-        shipping = get_ml_shipping_cost(price_discounted, peso_kg, largo_cm, ancho_cm, profundidad_cm)
+        shipping = _get_shipping_for_price(price_discounted)
         net_received = calculate_meli_net_received(price_discounted, fees, shipping)
         
         if abs(net_received - target_net) < 0.01:
@@ -1505,7 +1527,7 @@ def calculate_meli_promo_discount(cost, current_price, target_margin_pct, catego
     
     # --- PASO 4: Validación final exhaustiva ---
     fees_final = calculate_ml_fees(price_discounted, category_name, listing_type, has_rfc)
-    shipping_final = get_ml_shipping_cost(price_discounted, peso_kg, largo_cm, ancho_cm, profundidad_cm)
+    shipping_final = _get_shipping_for_price(price_discounted)
     net_final = calculate_meli_net_received(price_discounted, fees_final, shipping_final)
     profit_final = net_final - cost
     margin_final = (profit_final / net_final) * 100 if net_final > 0 else 0
@@ -2467,6 +2489,7 @@ with tab4:
                 "Producto": item.get("title", ""),
                 "SKU MELI": item.get("sku", ""),
                 "Tipo Pub": "Premium" if item.get("listing_type") == "premium" else "Clásica",
+                "Envío": "Gratis" if item.get("free_shipping") else "Comprador",
                 "Precio Base": item.get("price", 0),
                 "Costo Shopify": shopify_cost_map.get(str(item.get("sku", "")).strip().upper(), {}).get("costo", 0) or 0,
                 "Costo Final": shopify_cost_map.get(str(item.get("sku", "")).strip().upper(), {}).get("costo", 0) or 0,
@@ -2483,6 +2506,7 @@ with tab4:
                 "Producto": st.column_config.TextColumn("Producto", disabled=True, width="large"),
                 "SKU MELI": st.column_config.TextColumn("SKU MELI", disabled=True),
                 "Tipo Pub": st.column_config.TextColumn("Tipo Pub", disabled=True),
+                "Envío": st.column_config.TextColumn("Envío", disabled=True),
                 "Precio Base": st.column_config.NumberColumn("Precio Base", disabled=True, format="$%.2f"),
                 "Costo Shopify": st.column_config.NumberColumn("Costo Shopify", disabled=True, format="$%.2f"),
                 "Costo Final": st.column_config.NumberColumn("Costo Final (editable)", min_value=0, step=10.0, format="$%.2f"),
@@ -2546,10 +2570,11 @@ with tab4:
                         ancho_cm = info.get("ancho_cm", 0)
                         profundidad_cm = info.get("profundidad_cm", 0)
                     
-                    # Obtener categoría y tipo de publicación desde MELI (lookup O(1))
+                    # Obtener categoría, tipo de publicación y envío desde MELI (lookup O(1))
                     meli_item = meli_lookup.get(meli_id, {})
                     item_category = meli_item.get("category_name", "Custom")
                     item_listing_type = meli_item.get("listing_type", "classic")
+                    item_free_shipping = meli_item.get("free_shipping", False)
                     
                     # Calcular descuento óptimo
                     resultado = calculate_meli_promo_discount(
@@ -2562,7 +2587,8 @@ with tab4:
                         peso_kg=peso_kg,
                         largo_cm=largo_cm,
                         ancho_cm=ancho_cm,
-                        profundidad_cm=profundidad_cm
+                        profundidad_cm=profundidad_cm,
+                        free_shipping=item_free_shipping
                     )
                     
                     resultados_promo.append({
