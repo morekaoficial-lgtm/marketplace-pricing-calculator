@@ -2857,7 +2857,7 @@ with tab4:
                             
                             # Defensa contra caché de Streamlit Cloud
                             try:
-                                promociones_por_item = fetch_all_items_promotions(meli_token, items_meli, meli_user_id)
+                                promociones_por_item = fetch_all_items_promotions(meli_token, meli_items, meli_user_id)
                             except NameError as e:
                                 st.error(f"❌ Error de carga (caché): {e}")
                                 st.info("🔄 Intentá recargar la app con Ctrl+Shift+R o reiniciá desde 'Manage app'")
