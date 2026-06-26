@@ -3,6 +3,7 @@
 Calculadora de Precios para Marketplaces — México 2026
 Mercado Libre y Amazon México con comisiones reales 2026
 Lógica: Precio tope calculado para 5% de ganancia con 60% descuento
+VERSIÓN: 2026-06-27-v2
 Desde ese precio base fijo, se calculan las ganancias con 60%, 50%, 40%, 30% OFF
 Sincronización con Shopify morekashop1 para obtener costos
 """
