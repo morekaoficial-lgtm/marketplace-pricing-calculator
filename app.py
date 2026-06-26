@@ -2648,8 +2648,10 @@ with tab4:
                         df_export = df_export[["meli_id", "sku", "title", "current_price", "costo", 
                                                "precio_promo", "descuento_pct", "pago_neto", 
                                                "ganancia", "margen_sobre_neto", "estado"]]
+                        # Convertir descuento a entero (35.0 → 35)
+                        df_export["descuento_pct"] = df_export["descuento_pct"].fillna(0).astype(int)
                         df_export.columns = ["ID MELI", "SKU", "Producto", "Precio Base", "Costo",
-                                             "Precio Promo", "Descuento %", "Pago Neto",
+                                             "Precio Promo", "Descuento", "Pago Neto",
                                              "Ganancia", "Margen %", "Estado"]
                         
                         with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
@@ -2665,7 +2667,12 @@ with tab4:
                     except Exception as e:
                         st.warning(f"⚠️ No se pudo generar Excel: {e}")
                         csv_buffer = io.StringIO()
-                        pd.DataFrame(resultados_promo).to_csv(csv_buffer, index=False)
+                        df_csv = pd.DataFrame(resultados_promo)
+                        df_csv["descuento_pct"] = df_csv["descuento_pct"].fillna(0).astype(int)
+                        df_csv.columns = ["ID MELI", "SKU", "Producto", "Precio Base", "Costo",
+                                          "Precio Promo", "Descuento", "Pago Neto",
+                                          "Ganancia", "Margen %", "Estado"]
+                        df_csv.to_csv(csv_buffer, index=False)
                         st.download_button(
                             "📄 Descargar CSV (con costo)",
                             csv_buffer.getvalue(),
