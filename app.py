@@ -612,7 +612,7 @@ def calculate_ml_fees(price, category_name, listing_type="classic", has_rfc=True
         "net_received": price - total_fees,
     }
 
-def calculate_ml_base_price(cost, target_margin, discount_pct, category_name, listing_type="classic", has_rfc=True, shipping_cost=0, ad_cost_pct=0.10, peso_kg=0, largo_cm=0, ancho_cm=0, profundidad_cm=0, free_shipping=False):
+def calculate_ml_base_price(cost, target_margin, discount_pct, category_name, listing_type="classic", has_rfc=True, shipping_cost=0, ad_cost_pct=0.12, peso_kg=0, largo_cm=0, ancho_cm=0, profundidad_cm=0, free_shipping=False):
     """Calcula el precio BASE necesario para que el precio con descuento mantenga el margen deseado.
     Incluye costo de publicidad como % del precio de venta y envío basado en peso/dimensiones.
     
@@ -651,7 +651,7 @@ def calculate_ml_base_price(cost, target_margin, discount_pct, category_name, li
     
     return round(price_base, 2), round(price_discounted, 2)
 
-def calculate_ml_from_fixed_base(cost, base_price, discount_pct, category_name, listing_type="classic", has_rfc=True, shipping_cost=0, ad_cost_pct=0.10, peso_kg=0, largo_cm=0, ancho_cm=0, profundidad_cm=0, free_shipping=False):
+def calculate_ml_from_fixed_base(cost, base_price, discount_pct, category_name, listing_type="classic", has_rfc=True, shipping_cost=0, ad_cost_pct=0.12, peso_kg=0, largo_cm=0, ancho_cm=0, profundidad_cm=0, free_shipping=False):
     """Desde un precio base FIJO, calcula ganancia con un % de descuento dado. Incluye publicidad y envío por peso.
     
     Envío ML México (Abril 2026):
@@ -1432,16 +1432,18 @@ def apply_meli_promotion(access_token, item_id, user_id, deal_price, original_pr
     except Exception as e:
         return False, str(e)
 
-def calculate_meli_net_received(price, fees, shipping_cost):
-    """Calcula el pago neto que MELI muestra: precio - comisiones - envío"""
-    return price - fees["total_fees"] - shipping_cost
+def calculate_meli_net_received(price, fees, shipping_cost, ad_cost_pct=0.12):
+    """Calcula el pago neto que MELI muestra: precio - comisiones - envío - publicidad"""
+    ad_cost = price * ad_cost_pct
+    return price - fees["total_fees"] - shipping_cost - ad_cost
 
-def calculate_meli_promo_discount(cost, current_price, target_margin_pct, category_name, listing_type="classic", has_rfc=True, peso_kg=0, largo_cm=0, ancho_cm=0, profundidad_cm=0, free_shipping=False):
+def calculate_meli_promo_discount(cost, current_price, target_margin_pct, category_name, listing_type="classic", has_rfc=True, peso_kg=0, largo_cm=0, ancho_cm=0, profundidad_cm=0, free_shipping=False, ad_cost_pct=0.12):
     """
     Calcula el descuento óptimo para una promoción de MELI con alta precisión.
     
     target_margin_pct: margen deseado sobre el PAGO NETO (ej: 0.05 = 5%)
     free_shipping: True si el producto tiene envío gratis configurado en MELI
+    ad_cost_pct: Costo de publicidad como % del precio (default 12%)
     
     Usa método de bisección + refinamiento para convergencia exacta.
     """
@@ -1466,7 +1468,7 @@ def calculate_meli_promo_discount(cost, current_price, target_margin_pct, catego
     # --- PASO 1: Evaluar precio actual (sin descuento) ---
     fees_actual = calculate_ml_fees(current_price, category_name, listing_type, has_rfc)
     shipping_actual = _get_shipping_for_price(current_price)
-    net_actual = calculate_meli_net_received(current_price, fees_actual, shipping_actual)
+    net_actual = calculate_meli_net_received(current_price, fees_actual, shipping_actual, ad_cost_pct)
     profit_actual = net_actual - cost
     margin_actual = (profit_actual / net_actual) * 100 if net_actual > 0 else -999
     
@@ -1493,7 +1495,7 @@ def calculate_meli_promo_discount(cost, current_price, target_margin_pct, catego
         mid = (low + high) / 2
         fees_mid = calculate_ml_fees(mid, category_name, listing_type, has_rfc)
         shipping_mid = _get_shipping_for_price(mid)
-        net_mid = calculate_meli_net_received(mid, fees_mid, shipping_mid)
+        net_mid = calculate_meli_net_received(mid, fees_mid, shipping_mid, ad_cost_pct)
         profit_mid = net_mid - cost
         margin_mid = (profit_mid / net_mid) * 100 if net_mid > 0 else -999
         
@@ -1513,7 +1515,7 @@ def calculate_meli_promo_discount(cost, current_price, target_margin_pct, catego
     for _ in range(30):
         fees = calculate_ml_fees(price_discounted, category_name, listing_type, has_rfc)
         shipping = _get_shipping_for_price(price_discounted)
-        net_received = calculate_meli_net_received(price_discounted, fees, shipping)
+        net_received = calculate_meli_net_received(price_discounted, fees, shipping, ad_cost_pct)
         
         if abs(net_received - target_net) < 0.01:
             break
@@ -1529,7 +1531,7 @@ def calculate_meli_promo_discount(cost, current_price, target_margin_pct, catego
     # --- PASO 4: Validación final exhaustiva ---
     fees_final = calculate_ml_fees(price_discounted, category_name, listing_type, has_rfc)
     shipping_final = _get_shipping_for_price(price_discounted)
-    net_final = calculate_meli_net_received(price_discounted, fees_final, shipping_final)
+    net_final = calculate_meli_net_received(price_discounted, fees_final, shipping_final, ad_cost_pct)
     profit_final = net_final - cost
     margin_final = (profit_final / net_final) * 100 if net_final > 0 else 0
     
