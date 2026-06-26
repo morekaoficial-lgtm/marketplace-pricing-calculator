@@ -2857,9 +2857,9 @@ with tab4:
                     st.caption("Inscribe tus productos en promociones oficiales de MELI (OFERTA DEL DÍA, etc.)")
                     
                     # Obtener promociones activas
-                    if meli_token and user_info:
+                    if meli_token and meli_user:
                         with st.spinner("Cargando promociones disponibles..."):
-                            meli_user_id = user_info.get("id", "")
+                            meli_user_id = meli_user.get("id", "")
                             promociones = fetch_meli_active_promotions(meli_token, meli_user_id)
                             
                             if isinstance(promociones, dict) and "error" in promociones:
