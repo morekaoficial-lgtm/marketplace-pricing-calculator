@@ -2973,60 +2973,6 @@ with tab4:
                     else:
                         st.info("🔑 Conectá tu cuenta de Mercado Libre para ver promociones disponibles")
                     
-                    # ============================================================
-                    # APLICACIÓN DIRECTA (precio) — OPCIÓN ALTERNATIVA
-                    # ============================================================
-                    st.markdown("---")
-                    st.markdown("### 🔧 Aplicar Precio Directo (sin promoción oficial)")
-                    st.caption("Solo cambia el precio. No aparece como promoción con precio tachado.")
-                    
-                    with st.expander("Ver opción de precio directo"):
-                        aplicables = [r for r in resultados_promo if r["aplicar"]]
-                        
-                        if aplicables:
-                            st.info(f"Hay {len(aplicables)} productos listos para aplicar precio directo.")
-                            
-                            aplicar_masivo = st.button(
-                                f"🚀 Aplicar precio directo a {len(aplicables)} productos",
-                                type="secondary",
-                                key="btn_precio_directo"
-                            )
-                            
-                            if aplicar_masivo and meli_token:
-                                with st.spinner("Aplicando precios..."):
-                                    aplicados = 0
-                                    errores = []
-                                    
-                                    def _apply_single(r):
-                                        success, result = update_meli_item_price(
-                                            meli_token,
-                                            r["meli_id"],
-                                            r["precio_promo"],
-                                            r["current_price"]
-                                        )
-                                        return success, r["meli_id"], result
-                                    
-                                    with ThreadPoolExecutor(max_workers=20) as executor:
-                                        future_to_item = {executor.submit(_apply_single, r): r for r in aplicables}
-                                        for future in as_completed(future_to_item):
-                                            success, meli_id, result = future.result()
-                                            if success:
-                                                aplicados += 1
-                                            else:
-                                                errores.append(f"{meli_id}: {result}")
-                                    
-                                    if aplicados > 0:
-                                        st.success(f"✅ {aplicados}/{len(aplicables)} precios aplicados")
-                                    if errores:
-                                        with st.expander(f"❌ Errores ({len(errores)}):"):
-                                            for err in errores[:10]:
-                                                st.markdown(f"• {err}")
-                            elif aplicar_masivo:
-                                st.error("❌ No hay token de MELI configurado")
-                        else:
-                            st.warning("⚠️ No hay productos aplicables")
-
-    # ============================================================
 # FOOTER
 # ============================================================
 # FOOTER
