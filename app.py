@@ -1151,56 +1151,73 @@ def fetch_meli_user_info(access_token):
         return {"error": str(e)}
 
 @st.cache_data(ttl=300)
-def fetch_meli_items(access_token, user_id, limit=50, offset=0, status="active"):
-    """Obtiene items del seller desde MELI API con paginación"""
+def fetch_meli_items(access_token, user_id, limit=50, offset=0, status="active", fetch_all=True):
+    """Obtiene items del seller desde MELI API con paginación automática"""
     try:
-        url = f"{MELI_API_BASE}/users/{user_id}/items/search"
-        params = {
-            "limit": limit,
-            "offset": offset,
-            "status": status
-        }
-        r = requests.get(url, headers=get_meli_headers(access_token), params=params, timeout=15)
-        if r.status_code != 200:
-            return [], f"HTTP {r.status_code}: {r.text}"
+        all_items = []
+        current_offset = 0
+        max_pages = 20  # Safety limit
         
-        data = r.json()
-        item_ids = data.get("results", [])
+        while True:
+            url = f"{MELI_API_BASE}/users/{user_id}/items/search"
+            params = {
+                "limit": limit,
+                "offset": current_offset,
+                "status": status
+            }
+            r = requests.get(url, headers=get_meli_headers(access_token), params=params, timeout=15)
+            if r.status_code != 200:
+                return [], f"HTTP {r.status_code}: {r.text}"
+            
+            data = r.json()
+            item_ids = data.get("results", [])
+            total = data.get("paging", {}).get("total", 0)
+            
+            if not item_ids:
+                break
+            
+            # Obtener detalles de cada item
+            for item_id in item_ids:
+                try:
+                    item_r = requests.get(f"{MELI_API_BASE}/items/{item_id}", headers=get_meli_headers(access_token), timeout=10)
+                    if item_r.status_code == 200:
+                        item = item_r.json()
+                        # SKU puede estar en seller_custom_field o en atributos
+                        sku = item.get("seller_custom_field", "")
+                        if not sku and item.get("attributes"):
+                            for attr in item.get("attributes", []):
+                                if attr.get("id") in ["SELLER_SKU", "MODEL", "SKU"]:
+                                    sku = attr.get("value_name", "")
+                                    break
+                        all_items.append({
+                            "id": item.get("id"),
+                            "title": item.get("title", ""),
+                            "price": item.get("price", 0),
+                            "base_price": item.get("base_price", item.get("price", 0)),
+                            "original_price": item.get("original_price"),
+                            "available_quantity": item.get("available_quantity", 0),
+                            "sold_quantity": item.get("sold_quantity", 0),
+                            "status": item.get("status", ""),
+                            "permalink": item.get("permalink", ""),
+                            "thumbnail": item.get("thumbnail", ""),
+                            "category_id": item.get("category_id", ""),
+                            "listing_type_id": item.get("listing_type_id", ""),
+                            "shipping": item.get("shipping", {}),
+                            "sku": sku,
+                        })
+                    time.sleep(0.1)
+                except:
+                    continue
+            
+            # Check if we got all items
+            if not fetch_all or len(all_items) >= total or len(item_ids) < limit:
+                break
+            
+            current_offset += limit
+            if current_offset >= total or current_offset >= (max_pages * limit):
+                break
         
-        # Obtener detalles de cada item
-        items = []
-        for item_id in item_ids:
-            try:
-                item_r = requests.get(f"{MELI_API_BASE}/items/{item_id}", headers=get_meli_headers(access_token), timeout=10)
-                if item_r.status_code == 200:
-                    item = item_r.json()
-                    # SKU puede estar en seller_custom_field o en atributos
-                    sku = item.get("seller_custom_field", "")
-                    if not sku and item.get("attributes"):
-                        for attr in item.get("attributes", []):
-                            if attr.get("id") in ["SELLER_SKU", "MODEL", "SKU"]:
-                                sku = attr.get("value_name", "")
-                                break
-                    items.append({
-                        "id": item.get("id"),
-                        "title": item.get("title", ""),
-                        "price": item.get("price", 0),
-                        "base_price": item.get("base_price", item.get("price", 0)),
-                        "original_price": item.get("original_price"),
-                        "available_quantity": item.get("available_quantity", 0),
-                        "sold_quantity": item.get("sold_quantity", 0),
-                        "status": item.get("status", ""),
-                        "permalink": item.get("permalink", ""),
-                        "thumbnail": item.get("thumbnail", ""),
-                        "category_id": item.get("category_id", ""),
-                        "listing_type_id": item.get("listing_type_id", ""),
-                        "shipping": item.get("shipping", {}),
-                        "sku": sku,
-                    })
-                time.sleep(0.1)
-            except:
-                continue
-        return items, None
+        return all_items, None
     except Exception as e:
         return [], str(e)
 
@@ -2152,7 +2169,7 @@ with tab4:
                 
                 # Cargar items
                 with st.spinner("Cargando publicaciones..."):
-                    meli_items, err = fetch_meli_items(meli_token, user_id, limit=100, status="active")
+                    meli_items, err = fetch_meli_items(meli_token, user_id, status="active")
                     if err:
                         st.warning(f"⚠️ Error cargando items: {err}")
                     else:
@@ -2162,7 +2179,7 @@ with tab4:
         meli_user = fetch_meli_user_info(meli_token)
         if "error" not in meli_user:
             user_id = meli_user.get("id")
-            meli_items, _ = fetch_meli_items(meli_token, user_id, limit=100, status="active")
+            meli_items, _ = fetch_meli_items(meli_token, user_id, status="active")
     
     st.markdown("---")
     
@@ -2258,41 +2275,85 @@ with tab4:
                 "stock": item.get("available_quantity", 0),
             })
         
-        # Inputs manuales de costo para TODOS los productos
-        st.markdown("#### ✏️ Ingresa los costos para calcular descuentos")
-        st.info("💡 Los productos con costo desde Shopify aparecen prellenados. Podés ajustarlos o agregar costos manualmente.")
+        # ============================================================
+        # DEBUG SKU — mostrar coincidencias
+        # ============================================================
+        with st.expander("🔍 Diagnóstico de SKU (haz clic para ver)"):
+            col_dbg1, col_dbg2 = st.columns(2)
+            with col_dbg1:
+                st.markdown("**Primeros 10 SKU de MELI:**")
+                for i, item in enumerate(meli_items[:10]):
+                    st.markdown(f"{i+1}. `{item.get('sku') or 'SIN SKU'}` — {item.get('title', '')[:30]}...")
+            with col_dbg2:
+                st.markdown("**Primeros 10 SKU de Shopify:**")
+                shopify_skus = sorted(shopify_cost_map.keys())[:10]
+                for sku in shopify_skus:
+                    st.markdown(f"• `{sku}` — ${shopify_cost_map[sku]['costo']:,.2f}")
+            
+            # Contar coincidencias
+            coincidencias = sum(1 for item in meli_items if str(item.get("sku", "")).strip().upper() in shopify_cost_map)
+            st.info(f"📊 Coincidencias SKU: {coincidencias} de {len(meli_items)} productos MELI tienen costo en Shopify")
+
+        # ============================================================
+        # TABLA EDITABLE DE PRODUCTOS
+        # ============================================================
+        st.markdown("#### ✏️ Tabla de productos con costos (editables)")
+        st.info("💡 Los productos con SKU coincidente en Shopify aparecen con costo prellenado. Podés editar cualquier celda.")
         
-        costos_editados = {}
+        # Preparar DataFrame para data_editor
+        df_productos = pd.DataFrame([
+            {
+                "ID MELI": item.get("id"),
+                "Producto": item.get("title", ""),
+                "SKU MELI": item.get("sku", ""),
+                "Precio Base": item.get("price", 0),
+                "Costo Shopify": shopify_cost_map.get(str(item.get("sku", "")).strip().upper(), {}).get("costo", 0) or 0,
+                "Costo Final": shopify_cost_map.get(str(item.get("sku", "")).strip().upper(), {}).get("costo", 0) or 0,
+                "Stock": item.get("available_quantity", 0),
+            }
+            for item in meli_items
+        ])
         
-        # Mostrar tabla editable
-        for item in todos_productos:
-            costo_default = item["costo_shopify"] if item["costo_shopify"] is not None else 0.0
-            costo_input = st.number_input(
-                f"Costo MXN - {item['title'][:40]} (SKU: {item['sku'] or 'N/A'})",
-                min_value=0.0,
-                value=float(costo_default),
-                step=10.0,
-                key=f"costo_all_{item['meli_id']}"
-            )
-            if costo_input > 0:
-                costos_editados[item["meli_id"]] = costo_input
+        # Data editor para modificar costos
+        edited_df = st.data_editor(
+            df_productos,
+            column_config={
+                "ID MELI": st.column_config.TextColumn("ID MELI", disabled=True),
+                "Producto": st.column_config.TextColumn("Producto", disabled=True, width="large"),
+                "SKU MELI": st.column_config.TextColumn("SKU MELI", disabled=True),
+                "Precio Base": st.column_config.NumberColumn("Precio Base", disabled=True, format="$%.2f"),
+                "Costo Shopify": st.column_config.NumberColumn("Costo Shopify", disabled=True, format="$%.2f"),
+                "Costo Final": st.column_config.NumberColumn("Costo Final (editable)", min_value=0, step=10.0, format="$%.2f"),
+                "Stock": st.column_config.NumberColumn("Stock", disabled=True),
+            },
+            hide_index=True,
+            use_container_width=True,
+            height=500,
+            num_rows="fixed",
+        )
         
-        # Botón de cálculo
+        # ============================================================
+        # BOTÓN CALCULAR
+        # ============================================================
         calcular_todos = st.button("🚀 Calcular Descuentos para Todos", type="primary")
         
         if calcular_todos:
             with st.spinner("Calculando descuentos óptimos..."):
                 resultados_promo = []
                 
-                for item in todos_productos:
-                    costo = costos_editados.get(item["meli_id"], 0)
+                for _, row in edited_df.iterrows():
+                    costo = row["Costo Final"]
+                    current_price = row["Precio Base"]
+                    meli_id = row["ID MELI"]
+                    sku = row["SKU MELI"]
+                    title = row["Producto"]
+                    
                     if costo <= 0:
-                        # Producto sin costo - mostrar en tabla pero sin cálculo
                         resultados_promo.append({
-                            "meli_id": item["meli_id"],
-                            "sku": item["sku"],
-                            "title": item["title"],
-                            "current_price": item["current_price"],
+                            "meli_id": meli_id,
+                            "sku": sku,
+                            "title": title,
+                            "current_price": current_price,
                             "costo": 0,
                             "precio_promo": 0,
                             "descuento_pct": 0,
@@ -2303,41 +2364,52 @@ with tab4:
                             "ganancia": 0,
                             "margen_sobre_neto": 0,
                             "aplicar": False,
-                            "promos_activas": "",
                             "estado": "❌ Sin costo",
                         })
                         continue
                     
+                    # Buscar peso y medidas del item
+                    peso_kg = 0
+                    largo_cm = 0
+                    ancho_cm = 0
+                    profundidad_cm = 0
+                    item_sku = str(sku).strip().upper()
+                    if item_sku in shopify_cost_map:
+                        info = shopify_cost_map[item_sku]
+                        peso_kg = info.get("peso_kg", 0)
+                        largo_cm = info.get("largo_cm", 0)
+                        ancho_cm = info.get("ancho_cm", 0)
+                        profundidad_cm = info.get("profundidad_cm", 0)
+                    
                     # Calcular descuento óptimo
                     resultado = calculate_meli_promo_discount(
                         cost=costo,
-                        current_price=item["current_price"],
+                        current_price=current_price,
                         target_margin_pct=target_margin,
                         category_name=promo_ml_cat,
                         listing_type=promo_listing_type,
                         has_rfc=promo_has_rfc,
-                        peso_kg=item["peso_kg"],
-                        largo_cm=item["largo_cm"],
-                        ancho_cm=item["ancho_cm"],
-                        profundidad_cm=item["profundidad_cm"]
+                        peso_kg=peso_kg,
+                        largo_cm=largo_cm,
+                        ancho_cm=ancho_cm,
+                        profundidad_cm=profundidad_cm
                     )
                     
                     resultados_promo.append({
-                        "meli_id": item["meli_id"],
-                        "sku": item["sku"],
-                        "title": item["title"],
-                        "current_price": item["current_price"],
+                        "meli_id": meli_id,
+                        "sku": sku,
+                        "title": title,
+                        "current_price": current_price,
                         "costo": costo,
                         "precio_promo": resultado["price_discounted"],
                         "descuento_pct": resultado["discount_pct"],
-                        "descuento_monto": round(item["current_price"] - resultado["price_discounted"], 2) if item["current_price"] > resultado["price_discounted"] else 0,
+                        "descuento_monto": round(current_price - resultado["price_discounted"], 2) if current_price > resultado["price_discounted"] else 0,
                         "comisiones": resultado["fees"]["total_fees"],
                         "envio": resultado["shipping_cost"],
                         "pago_neto": resultado["net_received"],
                         "ganancia": resultado["profit"],
                         "margen_sobre_neto": resultado["margin"],
                         "aplicar": resultado["discount_pct"] > 0 and resultado["profit"] > 0,
-                        "promos_activas": "",
                         "estado": "✅ Calculado" if (resultado["discount_pct"] > 0 and resultado["profit"] > 0) else "⚠️ Sin ganancia",
                     })
                 
@@ -2369,11 +2441,9 @@ with tab4:
                     # ============================================================
                     st.markdown("### 📥 Exportar a Excel")
                     
-                    # Crear Excel con openpyxl
                     try:
                         excel_buffer = BytesIO()
                         df_export = pd.DataFrame(resultados_promo)
-                        # Limpiar columnas que no sirven para Excel
                         df_export = df_export[["meli_id", "sku", "title", "current_price", "costo", 
                                                "precio_promo", "descuento_pct", "pago_neto", 
                                                "ganancia", "margen_sobre_neto", "estado"]]
@@ -2393,7 +2463,6 @@ with tab4:
                         )
                     except Exception as e:
                         st.warning(f"⚠️ No se pudo generar Excel: {e}")
-                        # Fallback a CSV
                         csv_buffer = io.StringIO()
                         pd.DataFrame(resultados_promo).to_csv(csv_buffer, index=False)
                         st.download_button(
@@ -2429,7 +2498,7 @@ with tab4:
                                         meli_token,
                                         r["meli_id"],
                                         r["precio_promo"],
-                                        r["current_price"]  # original_price para mostrar tachado
+                                        r["current_price"]
                                     )
                                     if success:
                                         aplicados += 1
@@ -2478,7 +2547,6 @@ with tab4:
                     
                     if aplicar_manual and meli_token and manual_mlm_id and manual_precio > 0:
                         with st.spinner(f"Aplicando descuento a {manual_mlm_id}..."):
-                            # Buscar precio original
                             original_price = None
                             for r in resultados_promo:
                                 if r["meli_id"] == manual_mlm_id:
@@ -2498,6 +2566,8 @@ with tab4:
                                 st.error(f"❌ Error: {result}")
                     elif aplicar_manual:
                         st.error("❌ Completa el ID de publicación y el precio")
+        else:
+            st.info("💡 Editá los costos en la tabla de arriba y presioná 'Calcular Descuentos para Todos'")
 
     # ============================================================
 # FOOTER
