@@ -2747,18 +2747,25 @@ with tab4:
                                 aplicados = 0
                                 errores = []
                                 
-                                for r in aplicables:
+                                def _apply_single(r):
+                                    """Helper para aplicar descuento a un solo item"""
                                     success, result = update_meli_item_price(
                                         meli_token,
                                         r["meli_id"],
                                         r["precio_promo"],
                                         r["current_price"]
                                     )
-                                    if success:
-                                        aplicados += 1
-                                    else:
-                                        errores.append(f"{r['meli_id']}: {result}")
-                                    time.sleep(0.2)
+                                    return success, r["meli_id"], result
+                                
+                                # Aplicar en paralelo (20 workers)
+                                with ThreadPoolExecutor(max_workers=20) as executor:
+                                    future_to_item = {executor.submit(_apply_single, r): r for r in aplicables}
+                                    for future in as_completed(future_to_item):
+                                        success, meli_id, result = future.result()
+                                        if success:
+                                            aplicados += 1
+                                        else:
+                                            errores.append(f"{meli_id}: {result}")
                                 
                                 if aplicados > 0:
                                     st.success(f"✅ {aplicados} descuentos aplicados correctamente")
