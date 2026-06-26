@@ -1432,6 +1432,129 @@ def apply_meli_promotion(access_token, item_id, user_id, deal_price, original_pr
     except Exception as e:
         return False, str(e)
 
+
+@st.cache_data(ttl=300)
+def fetch_meli_active_promotions(access_token, user_id):
+    """
+    Obtiene las promociones oficiales activas disponibles para el seller.
+    
+    Endpoints MELI:
+    - GET /seller-promotions?user_id={user_id}&status=active
+    """
+    try:
+        url = f"{MELI_API_BASE}/seller-promotions"
+        params = {"user_id": user_id, "status": "active"}
+        headers = get_meli_headers(access_token)
+        headers["version"] = "v2"
+        
+        r = requests.get(url, headers=headers, params=params, timeout=15)
+        if r.status_code == 200:
+            data = r.json()
+            # Estructura típica: {"results": [{"id": "...", "name": "...", ...}]}
+            promos = data.get("results", [])
+            return promos
+        elif r.status_code == 404:
+            # No hay promociones activas
+            return []
+        else:
+            return {"error": f"HTTP {r.status_code}: {r.text}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@st.cache_data(ttl=300)
+def get_promotion_eligible_items(access_token, promotion_id, user_id):
+    """
+    Obtiene los items elegibles para una promoción específica.
+    
+    Endpoint: GET /seller-promotions/{promotion_id}/items?user_id={user_id}
+    """
+    try:
+        url = f"{MELI_API_BASE}/seller-promotions/{promotion_id}/items"
+        params = {"user_id": user_id, "limit": 50}
+        headers = get_meli_headers(access_token)
+        headers["version"] = "v2"
+        
+        all_items = []
+        offset = 0
+        max_pages = 20
+        
+        while True:
+            params["offset"] = offset
+            r = requests.get(url, headers=headers, params=params, timeout=15)
+            if r.status_code == 200:
+                data = r.json()
+                items = data.get("results", [])
+                if not items:
+                    break
+                all_items.extend(items)
+                if len(items) < 50 or len(all_items) >= data.get("paging", {}).get("total", 0):
+                    break
+                offset += 50
+            else:
+                return {"error": f"HTTP {r.status_code}: {r.text}"}
+        
+        return all_items
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def enroll_item_to_promotion(access_token, promotion_id, item_id, deal_price, user_id):
+    """
+    Inscribe un item en una promoción oficial de MELI.
+    
+    Endpoint: POST /seller-promotions/{promotion_id}/items/{item_id}
+    """
+    try:
+        url = f"{MELI_API_BASE}/seller-promotions/{promotion_id}/items/{item_id}"
+        params = {"user_id": user_id}
+        headers = get_meli_headers(access_token)
+        headers["version"] = "v2"
+        
+        body = {
+            "deal_price": round(deal_price, 2)
+        }
+        
+        r = requests.post(url, headers=headers, params=params, json=body, timeout=15)
+        if r.status_code in [200, 201]:
+            return True, r.json()
+        else:
+            return False, f"HTTP {r.status_code}: {r.text}"
+    except Exception as e:
+        return False, str(e)
+
+
+def get_promotion_requirements(promo):
+    """Extrae requisitos clave de una promoción de MELI"""
+    req = {
+        "id": promo.get("id", ""),
+        "name": promo.get("name", "Sin nombre"),
+        "type": promo.get("type", "UNKNOWN"),
+        "min_discount": 0,
+        "max_discount": 100,
+        "start_date": promo.get("start_date", ""),
+        "finish_date": promo.get("finish_date", ""),
+        "status": promo.get("status", ""),
+    }
+    
+    # Extraer descuento mínimo requerido
+    benefits = promo.get("benefits", {})
+    if benefits:
+        discount = benefits.get("discount", {})
+        if discount:
+            req["min_discount"] = discount.get("min_percentage", 0)
+            req["max_discount"] = discount.get("max_percentage", 100)
+    
+    # O buscar en requirements
+    requirements = promo.get("requirements", {})
+    if requirements:
+        price = requirements.get("price", {})
+        if price:
+            req["min_discount"] = price.get("min_discount_percentage", req["min_discount"])
+    
+    return req
+
+
 def calculate_meli_net_received(price, fees, shipping_cost, ad_cost_pct=0.12):
     """Calcula el pago neto que MELI muestra: precio - comisiones - envío - publicidad"""
     ad_cost = price * ad_cost_pct
@@ -2727,110 +2850,185 @@ with tab4:
                             st.warning(f"⚠️ No se pudo generar Excel: {e}")
                     
                     # ============================================================
-                    # APLICACIÓN MASIVA
+                    # PROMOCIONES OFICIALES MELI
                     # ============================================================
                     st.markdown("---")
-                    st.markdown("### ⚡ Aplicar Descuentos Masivamente")
+                    st.markdown("### 🏷️ Promociones Oficiales de Mercado Libre")
+                    st.caption("Inscribe tus productos en promociones oficiales de MELI (OFERTA DEL DÍA, etc.)")
                     
-                    aplicables = [r for r in resultados_promo if r["aplicar"]]
-                    
-                    if aplicables:
-                        st.info(f"Hay {len(aplicables)} productos listos para aplicar descuento.")
-                        
-                        aplicar_masivo = st.button(
-                            f"🚀 Aplicar descuentos a {len(aplicables)} productos",
-                            type="primary"
-                        )
-                        
-                        if aplicar_masivo and meli_token:
-                            with st.spinner("Aplicando descuentos..."):
-                                aplicados = 0
-                                errores = []
-                                
-                                def _apply_single(r):
-                                    """Helper para aplicar descuento a un solo item"""
-                                    success, result = update_meli_item_price(
-                                        meli_token,
-                                        r["meli_id"],
-                                        r["precio_promo"],
-                                        r["current_price"]
-                                    )
-                                    return success, r["meli_id"], result
-                                
-                                # Aplicar en paralelo (20 workers)
-                                with ThreadPoolExecutor(max_workers=20) as executor:
-                                    future_to_item = {executor.submit(_apply_single, r): r for r in aplicables}
-                                    for future in as_completed(future_to_item):
-                                        success, meli_id, result = future.result()
-                                        if success:
-                                            aplicados += 1
-                                        else:
-                                            errores.append(f"{meli_id}: {result}")
-                                
-                                if aplicados > 0:
-                                    st.success(f"✅ {aplicados} descuentos aplicados correctamente")
-                                if errores:
-                                    with st.expander(f"❌ Errores ({len(errores)})"):
-                                        for err in errores[:10]:
-                                            st.markdown(f"• {err}")
-                        elif aplicar_masivo:
-                            st.error("❌ No hay token de MELI configurado")
-                    else:
-                        st.warning("⚠️ No hay productos aplicables. Verifica que tengan costo y margen positivo.")
-                    
-                    # ============================================================
-                    # APLICACIÓN MANUAL POR MLM ID
-                    # ============================================================
-                    st.markdown("---")
-                    st.markdown("### 🔧 Aplicar Descuento Manual (por ID de publicación)")
-                    
-                    manual_col1, manual_col2, manual_col3 = st.columns([2, 1, 1])
-                    
-                    with manual_col1:
-                        manual_mlm_id = st.text_input(
-                            "ID de publicación MELI",
-                            placeholder="MLM1234567890",
-                            key="manual_mlm_id"
-                        )
-                    
-                    with manual_col2:
-                        manual_precio = st.number_input(
-                            "Nuevo precio",
-                            min_value=0.0,
-                            value=0.0,
-                            step=10.0,
-                            key="manual_precio"
-                        )
-                    
-                    with manual_col3:
-                        st.markdown("<br>", unsafe_allow_html=True)
-                        aplicar_manual = st.button("Aplicar", type="primary", key="btn_aplicar_manual")
-                    
-                    if aplicar_manual and meli_token and manual_mlm_id and manual_precio > 0:
-                        with st.spinner(f"Aplicando descuento a {manual_mlm_id}..."):
-                            original_price = None
-                            for r in resultados_promo:
-                                if r["meli_id"] == manual_mlm_id:
-                                    original_price = r["current_price"]
-                                    break
+                    # Obtener promociones activas
+                    if meli_token and user_info:
+                        with st.spinner("Cargando promociones disponibles..."):
+                            meli_user_id = user_info.get("id", "")
+                            promociones = fetch_meli_active_promotions(meli_token, meli_user_id)
                             
-                            success, result = update_meli_item_price(
-                                meli_token,
-                                manual_mlm_id,
-                                manual_precio,
-                                original_price
+                            if isinstance(promociones, dict) and "error" in promociones:
+                                st.error(f"❌ Error al cargar promociones: {promociones['error']}")
+                            elif not promociones:
+                                st.info("📭 No hay promociones oficiales activas disponibles en este momento.")
+                            else:
+                                st.success(f"🎉 {len(promociones)} promoción(es) activa(s) encontrada(s)")
+                                
+                                promo_options = {}
+                                for promo in promociones:
+                                    req = get_promotion_requirements(promo)
+                                    label = f"{req['name']} — Desc. mín: {req['min_discount']}%"
+                                    promo_options[label] = req
+                                
+                                promo_seleccionada = st.selectbox(
+                                    "Selecciona una promoción:",
+                                    options=list(promo_options.keys()),
+                                    key="promo_selector"
+                                )
+                                
+                                if promo_seleccionada:
+                                    promo_req = promo_options[promo_seleccionada]
+                                    promo_id = promo_req["id"]
+                                    min_discount = promo_req["min_discount"]
+                                    
+                                    col1, col2, col3 = st.columns(3)
+                                    with col1:
+                                        st.metric("Descuento Mínimo", f"{min_discount}%")
+                                    with col2:
+                                        st.metric("Descuento Máximo", f"{promo_req['max_discount']}%")
+                                    with col3:
+                                        st.metric("Tipo", promo_req["type"])
+                                    
+                                    st.markdown("#### ✅ Productos que califican")
+                                    
+                                    productos_califican = []
+                                    for r in resultados_promo:
+                                        if r["aplicar"] and r["descuento_pct"] >= min_discount:
+                                            if r["descuento_pct"] <= promo_req["max_discount"]:
+                                                productos_califican.append(r)
+                                    
+                                    if productos_califican:
+                                        st.info(f"{len(productos_califican)} productos califican (descuento {min_discount}-{promo_req['max_discount']}%)")
+                                        
+                                        df_calif = pd.DataFrame([
+                                            {
+                                                "ID MELI": p["meli_id"],
+                                                "Producto": p["title"][:30] + "..." if len(p["title"]) > 30 else p["title"],
+                                                "Precio Base": f"${p['current_price']:,.2f}",
+                                                "Precio Promo": f"${p['precio_promo']:,.2f}",
+                                                "Descuento": int(p["descuento_pct"]),
+                                                "Margen": f"{p['margen_sobre_neto']:.1f}%",
+                                            }
+                                            for p in productos_califican
+                                        ])
+                                        st.dataframe(df_calif, use_container_width=True, hide_index=True, height=min(len(productos_califican)*45, 300))
+                                        
+                                        inscribir_promo = st.button(
+                                            f"🏷️ Inscribir {len(productos_califican)} productos en '{promo_req['name']}'",
+                                            type="primary",
+                                            key="btn_inscribir_promo"
+                                        )
+                                        
+                                        if inscribir_promo:
+                                            with st.spinner("Inscribiendo productos en promoción..."):
+                                                inscritos = 0
+                                                errores_promo = []
+                                                
+                                                def _enroll_single(p):
+                                                    success, result = enroll_item_to_promotion(
+                                                        meli_token,
+                                                        promo_id,
+                                                        p["meli_id"],
+                                                        p["precio_promo"],
+                                                        meli_user_id
+                                                    )
+                                                    return success, p["meli_id"], result
+                                                
+                                                with ThreadPoolExecutor(max_workers=10) as executor:
+                                                    futures = {executor.submit(_enroll_single, p): p for p in productos_califican}
+                                                    for future in as_completed(futures):
+                                                        success, meli_id, result = future.result()
+                                                        if success:
+                                                            inscritos += 1
+                                                        else:
+                                                            errores_promo.append(f"{meli_id}: {result}")
+                                                
+                                                if inscritos > 0:
+                                                    st.success(f"✅ {inscritos}/{len(productos_califican)} productos inscritos")
+                                                if errores_promo:
+                                                    with st.expander(f"❌ Errores ({len(errores_promo)}):"):
+                                                        for err in errores_promo[:10]:
+                                                            st.markdown(f"• {err}")
+                                    else:
+                                        st.warning(f"⚠️ Ningún producto califica. Necesitas descuento entre {min_discount}% y {promo_req['max_discount']}%")
+                                        
+                                        cercanos = [r for r in resultados_promo if r["aplicar"] and r["descuento_pct"] >= min_discount * 0.8]
+                                        if cercanos:
+                                            st.caption(f"Productos cercanos (>{int(min_discount * 0.8)}%):")
+                                            df_cerca = pd.DataFrame([
+                                                {
+                                                    "ID MELI": p["meli_id"],
+                                                    "Producto": p["title"][:30] + "...",
+                                                    "Descuento Calculado": f"{int(p['descuento_pct'])}%",
+                                                    "Falta": f"{int(min_discount - p['descuento_pct'])}%",
+                                                }
+                                                for p in cercanos[:10]
+                                            ])
+                                            st.dataframe(df_cerca, use_container_width=True, hide_index=True)
+                    else:
+                        st.info("🔑 Conectá tu cuenta de Mercado Libre para ver promociones disponibles")
+                    
+                    # ============================================================
+                    # APLICACIÓN DIRECTA (precio) — OPCIÓN ALTERNATIVA
+                    # ============================================================
+                    st.markdown("---")
+                    st.markdown("### 🔧 Aplicar Precio Directo (sin promoción oficial)")
+                    st.caption("Solo cambia el precio. No aparece como promoción con precio tachado.")
+                    
+                    with st.expander("Ver opción de precio directo"):
+                        aplicables = [r for r in resultados_promo if r["aplicar"]]
+                        
+                        if aplicables:
+                            st.info(f"Hay {len(aplicables)} productos listos para aplicar precio directo.")
+                            
+                            aplicar_masivo = st.button(
+                                f"🚀 Aplicar precio directo a {len(aplicables)} productos",
+                                type="secondary",
+                                key="btn_precio_directo"
                             )
                             
-                            if success:
-                                st.success(f"✅ Descuento aplicado a {manual_mlm_id}: ${manual_precio:,.2f}")
-                            else:
-                                st.error(f"❌ Error: {result}")
-                    elif aplicar_manual:
-                        st.error("❌ Completa el ID de publicación y el precio")
-        else:
-            st.info("💡 Editá los costos en la tabla de arriba y presioná 'Calcular Descuentos para Todos'")
+                            if aplicar_masivo and meli_token:
+                                with st.spinner("Aplicando precios..."):
+                                    aplicados = 0
+                                    errores = []
+                                    
+                                    def _apply_single(r):
+                                        success, result = update_meli_item_price(
+                                            meli_token,
+                                            r["meli_id"],
+                                            r["precio_promo"],
+                                            r["current_price"]
+                                        )
+                                        return success, r["meli_id"], result
+                                    
+                                    with ThreadPoolExecutor(max_workers=20) as executor:
+                                        future_to_item = {executor.submit(_apply_single, r): r for r in aplicables}
+                                        for future in as_completed(future_to_item):
+                                            success, meli_id, result = future.result()
+                                            if success:
+                                                aplicados += 1
+                                            else:
+                                                errores.append(f"{meli_id}: {result}")
+                                    
+                                    if aplicados > 0:
+                                        st.success(f"✅ {aplicados}/{len(aplicables)} precios aplicados")
+                                    if errores:
+                                        with st.expander(f"❌ Errores ({len(errores)}):"):
+                                            for err in errores[:10]:
+                                                st.markdown(f"• {err}")
+                            elif aplicar_masivo:
+                                st.error("❌ No hay token de MELI configurado")
+                        else:
+                            st.warning("⚠️ No hay productos aplicables")
 
     # ============================================================
+# FOOTER
+# ============================================================
 # FOOTER
 # ============================================================
 st.markdown("---")
