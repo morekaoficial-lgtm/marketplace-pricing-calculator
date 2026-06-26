@@ -16,6 +16,7 @@ import os
 from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
+from io import BytesIO
 
 # ============================================================
 # CONFIGURACIÓN GOOGLE SHEETS — PESOS Y MEDIDAS
@@ -2200,10 +2201,11 @@ with tab4:
     
     st.markdown("---")
     
+
     # ============================================================
-    # SECCIÓN 3: ARQUEO DE COSTOS DESDE SHOPIFY
+    # SECCIÓN 3: TABLA COMPLETA DE PRODUCTOS CON CÁLCULO DE DESCUENTOS
     # ============================================================
-    st.markdown("### 📦 Arqueo de Costos desde Shopify")
+    st.markdown("### 📦 Todos los Productos - Cálculo de Descuentos")
     
     if not meli_items:
         st.warning("⚠️ Primero conecta tu cuenta de Mercado Libre para ver los productos.")
@@ -2230,10 +2232,8 @@ with tab4:
                     "profundidad_cm": p.get("Profundidad cm", 0),
                 }
         
-        # Tabla de arqueo
-        st.markdown("#### 📝 Revisa y ajusta los costos antes de calcular descuentos")
-        
-        arqueo_data = []
+        # Construir tabla de todos los productos
+        todos_productos = []
         for item in meli_items:
             item_sku = str(item.get("sku", "")).strip().upper()
             current_price = item.get("price", 0)
@@ -2245,7 +2245,7 @@ with tab4:
                 shopify_info = shopify_cost_map[item_sku]
                 costo_shopify = shopify_info["costo"]
             
-            arqueo_data.append({
+            todos_productos.append({
                 "meli_id": item.get("id"),
                 "title": item.get("title", ""),
                 "sku": item.get("sku", ""),
@@ -2258,106 +2258,54 @@ with tab4:
                 "stock": item.get("available_quantity", 0),
             })
         
-        # Mostrar tabla editable de arqueo
-        df_arqueo = pd.DataFrame(arqueo_data)
+        # Inputs manuales de costo para TODOS los productos
+        st.markdown("#### ✏️ Ingresa los costos para calcular descuentos")
+        st.info("💡 Los productos con costo desde Shopify aparecen prellenados. Podés ajustarlos o agregar costos manualmente.")
         
-        # Resumen
-        con_costo = len([x for x in arqueo_data if x["costo_shopify"] is not None])
-        sin_costo = len(arqueo_data) - con_costo
+        costos_editados = {}
         
-        st.markdown(f"""
-        <div class="success-box">
-            <b>📊 Resumen del arqueo:</b><br>
-            • {con_costo} productos con costo desde Shopify<br>
-            • {sin_costo} productos SIN costo (requieren ingreso manual)<br>
-            • {len(arqueo_data)} total de publicaciones activas
-        </div>
-        """, unsafe_allow_html=True)
+        # Mostrar tabla editable
+        for item in todos_productos:
+            costo_default = item["costo_shopify"] if item["costo_shopify"] is not None else 0.0
+            costo_input = st.number_input(
+                f"Costo MXN - {item['title'][:40]} (SKU: {item['sku'] or 'N/A'})",
+                min_value=0.0,
+                value=float(costo_default),
+                step=10.0,
+                key=f"costo_all_{item['meli_id']}"
+            )
+            if costo_input > 0:
+                costos_editados[item["meli_id"]] = costo_input
         
-        # Tabla con inputs para ajustar costos manuales
-        st.markdown("#### ✏️ Ajusta los costos manualmente si es necesario")
+        # Botón de cálculo
+        calcular_todos = st.button("🚀 Calcular Descuentos para Todos", type="primary")
         
-        edited_costs = {}
-        
-        # Mostrar en un dataframe editable simplificado
-        display_rows = []
-        for item in arqueo_data:
-            display_rows.append({
-                "ID MELI": item["meli_id"],
-                "SKU": item["sku"] or "—",
-                "Producto": item["title"][:50] + "..." if len(item["title"]) > 50 else item["title"],
-                "Precio Actual": f"${item['current_price']:,.2f}",
-                "Costo Shopify": f"${item['costo_shopify']:,.2f}" if item['costo_shopify'] else "—",
-                "Stock": item["stock"],
-            })
-        
-        df_display = pd.DataFrame(display_rows)
-        st.dataframe(df_display, use_container_width=True, hide_index=True, height=400)
-        
-        # Inputs manuales para productos sin costo
-        if sin_costo > 0:
-            with st.expander(f"📝 Ingresar costos manuales ({sin_costo} productos sin costo)"):
-                manual_costs = {}
-                for item in arqueo_data:
-                    if item["costo_shopify"] is None:
-                        col_a, col_b = st.columns([3, 1])
-                        with col_a:
-                            st.markdown(f"**{item['title'][:40]}** (SKU: {item['sku'] or 'N/A'})")
-                        with col_b:
-                            manual_cost = st.number_input(
-                                f"Costo MXN",
-                                min_value=0.0,
-                                value=0.0,
-                                step=10.0,
-                                key=f"manual_cost_{item['meli_id']}"
-                            )
-                            if manual_cost > 0:
-                                manual_costs[item["meli_id"]] = manual_cost
-                
-                # Actualizar costos manuales
-                for item in arqueo_data:
-                    if item["meli_id"] in manual_costs:
-                        item["costo_manual"] = manual_costs[item["meli_id"]]
-                    else:
-                        item["costo_manual"] = None
-        else:
-            for item in arqueo_data:
-                item["costo_manual"] = None
-    
-    st.markdown("---")
-    
-    # ============================================================
-    # SECCIÓN 4: CÁLCULO DE DESCUENTOS
-    # ============================================================
-    st.markdown("### 🧮 Cálculo de Descuentos para Promoción")
-    
-    if meli_items and arqueo_data:
-        calc_col1, calc_col2 = st.columns([3, 1])
-        
-        with calc_col2:
-            st.markdown("<br>", unsafe_allow_html=True)
-            calcular_descuentos = st.button("🚀 Calcular Descuentos", type="primary", use_container_width=True)
-        
-        with calc_col1:
-            st.markdown(f"""
-            <div class="warning-box">
-                <b>⚙️ Configuración actual:</b><br>
-                • Margen objetivo: <b>{promo_margin}</b> sobre pago neto de MELI<br>
-                • Categoría: <b>{promo_ml_cat}</b> ({promo_listing_type})<br>
-                • RFC: <b>{'Sí' if promo_has_rfc else 'No'}</b><br>
-                • Productos a calcular: <b>{len(arqueo_data)}</b>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        if calcular_descuentos:
+        if calcular_todos:
             with st.spinner("Calculando descuentos óptimos..."):
                 resultados_promo = []
                 
-                for item in arqueo_data:
-                    # Determinar costo final
-                    costo = item["costo_shopify"] if item["costo_shopify"] is not None else item.get("costo_manual", 0)
-                    
+                for item in todos_productos:
+                    costo = costos_editados.get(item["meli_id"], 0)
                     if costo <= 0:
+                        # Producto sin costo - mostrar en tabla pero sin cálculo
+                        resultados_promo.append({
+                            "meli_id": item["meli_id"],
+                            "sku": item["sku"],
+                            "title": item["title"],
+                            "current_price": item["current_price"],
+                            "costo": 0,
+                            "precio_promo": 0,
+                            "descuento_pct": 0,
+                            "descuento_monto": 0,
+                            "comisiones": 0,
+                            "envio": 0,
+                            "pago_neto": 0,
+                            "ganancia": 0,
+                            "margen_sobre_neto": 0,
+                            "aplicar": False,
+                            "promos_activas": "",
+                            "estado": "❌ Sin costo",
+                        })
                         continue
                     
                     # Calcular descuento óptimo
@@ -2374,44 +2322,6 @@ with tab4:
                         profundidad_cm=item["profundidad_cm"]
                     )
                     
-                    # También agregar costo manual si existe
-                    costo_manual = edited_costs.get(item["meli_id"], 0)
-                    if costo_manual > 0:
-                        costo = costo_manual
-                    
-                    # Obtener promociones activas del item (desde /items/{id}/prices)
-                    promo_activas = []
-                    if meli_token and item.get("meli_id"):
-                        try:
-                            prices_data = fetch_meli_item_prices(meli_token, item["meli_id"])
-                            if prices_data and prices_data.get("prices"):
-                                for p in prices_data["prices"]:
-                                    if p.get("type") == "promotion":
-                                        promo_activas.append({
-                                            "precio": p.get("amount"),
-                                            "regular": p.get("regular_amount"),
-                                            "descuento_pct": round((1 - p.get("amount",0)/p.get("regular_amount",1)) * 100, 1) if p.get("regular_amount") else 0,
-                                            "inicio": p.get("conditions",{}).get("start_time"),
-                                            "fin": p.get("conditions",{}).get("end_time"),
-                                        })
-                        except:
-                            pass
-                    
-                    # Si el item ya tiene promociones activas, mostrarlas
-                    promo_text = ""
-                    if promo_activas:
-                        promo_parts = []
-                        for p in promo_activas:
-                            promo_parts.append(f"${p['precio']:.0f} ({p['descuento_pct']:.0f}% off)")
-                        promo_text = " | ".join(promo_parts)
-                    
-                    # Verificar si el item ya tiene promoción con mejor precio que el calculado
-                    if promo_activas:
-                        mejor_promo = min(p["precio"] for p in promo_activas)
-                        if mejor_promo <= resultado["price_discounted"]:
-                            # Ya tiene promoción igual o mejor
-                            pass
-                    
                     resultados_promo.append({
                         "meli_id": item["meli_id"],
                         "sku": item["sku"],
@@ -2427,148 +2337,169 @@ with tab4:
                         "ganancia": resultado["profit"],
                         "margen_sobre_neto": resultado["margin"],
                         "aplicar": resultado["discount_pct"] > 0 and resultado["profit"] > 0,
-                        "promos_activas": promo_text,  # ← NUEVO: promociones activas actuales
+                        "promos_activas": "",
+                        "estado": "✅ Calculado" if (resultado["discount_pct"] > 0 and resultado["profit"] > 0) else "⚠️ Sin ganancia",
                     })
                 
                 if resultados_promo:
                     st.success(f"✅ Cálculo completado para {len(resultados_promo)} productos")
                     
-                    # Mostrar resumen
-                    aplicables = [r for r in resultados_promo if r["aplicar"]]
-                    no_aplicables = [r for r in resultados_promo if not r["aplicar"]]
-                    
-                    st.markdown(f"""
-                    <div class="success-box">
-                        <b>📊 Resumen de descuentos calculados:</b><br>
-                        • Productos aplicables: <b>{len(aplicables)}</b><br>
-                        • Productos NO aplicables (pérdida o sin descuento): <b>{len(no_aplicables)}</b><br>
-                        • Descuento promedio: <b>{sum(r['descuento_pct'] for r in aplicables) / len(aplicables):.1f}%</b> (de los aplicables)
-                    </div>
-                    """, unsafe_allow_html=True)
-                    
-                    # Tabla de resultados
+                    # Mostrar tabla de resultados
                     df_resultados = pd.DataFrame([
                         {
                             "ID MELI": r["meli_id"],
                             "SKU": r["sku"] or "—",
-                            "Producto": r["title"][:40] + "..." if len(r["title"]) > 40 else r["title"],
-                            "Precio Actual": f"${r['current_price']:,.2f}",
-                            "Costo": f"${r['costo']:,.2f}",
-                            "Precio Promo": f"${r['precio_promo']:,.2f}",
-                            "Descuento": f"{r['descuento_pct']:.1f}%",
-                            "Pago Neto": f"${r['pago_neto']:,.2f}",
-                            "Ganancia": f"${r['ganancia']:,.2f}",
-                            "Margen": f"{r['margen_sobre_neto']:.1f}%",
-                            "Promos Activas": r.get("promos_activas", "") or "—",
-                            "Estado": "✅ Aplicable" if r["aplicar"] else "❌ No aplica",
+                            "Producto": r["title"][:35] + "..." if len(r["title"]) > 35 else r["title"],
+                            "Precio Base": f"${r['current_price']:,.2f}",
+                            "Costo": f"${r['costo']:,.2f}" if r['costo'] > 0 else "—",
+                            "Precio Promo": f"${r['precio_promo']:,.2f}" if r['precio_promo'] > 0 else "—",
+                            "Descuento %": f"{r['descuento_pct']:.1f}%" if r['descuento_pct'] > 0 else "—",
+                            "Pago Neto": f"${r['pago_neto']:,.2f}" if r['pago_neto'] > 0 else "—",
+                            "Ganancia": f"${r['ganancia']:,.2f}" if r['ganancia'] != 0 else "—",
+                            "Margen": f"{r['margen_sobre_neto']:.1f}%" if r['margen_sobre_neto'] != 0 else "—",
+                            "Estado": r["estado"],
                         }
                         for r in resultados_promo
                     ])
                     
-                    st.dataframe(df_resultados, use_container_width=True, hide_index=True, height=500)
+                    st.dataframe(df_resultados, use_container_width=True, hide_index=True, height=600)
                     
-                    # Descargar planilla de descuentos
-                    st.markdown("### 📥 Exportar Planilla de Descuentos")
+                    # ============================================================
+                    # EXPORTAR A EXCEL
+                    # ============================================================
+                    st.markdown("### 📥 Exportar a Excel")
                     
-                    # CSV completo
-                    csv_promo = io.StringIO()
-                    pd.DataFrame(resultados_promo).to_csv(csv_promo, index=False)
-                    st.download_button(
-                        "📄 Descargar CSV completo",
-                        csv_promo.getvalue(),
-                        f"promocion_meli_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-                        "text/csv"
-                    )
-                    
-                    # Solo aplicables
-                    if aplicables:
-                        csv_aplicables = io.StringIO()
-                        pd.DataFrame(aplicables).to_csv(csv_aplicables, index=False)
+                    # Crear Excel con openpyxl
+                    try:
+                        excel_buffer = BytesIO()
+                        df_export = pd.DataFrame(resultados_promo)
+                        # Limpiar columnas que no sirven para Excel
+                        df_export = df_export[["meli_id", "sku", "title", "current_price", "costo", 
+                                               "precio_promo", "descuento_pct", "pago_neto", 
+                                               "ganancia", "margen_sobre_neto", "estado"]]
+                        df_export.columns = ["ID MELI", "SKU", "Producto", "Precio Base", "Costo",
+                                             "Precio Promo", "Descuento %", "Pago Neto",
+                                             "Ganancia", "Margen %", "Estado"]
+                        
+                        with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                            df_export.to_excel(writer, sheet_name='Descuentos', index=False)
+                        
+                        excel_buffer.seek(0)
                         st.download_button(
-                            "✅ Descargar solo aplicables",
-                            csv_aplicables.getvalue(),
-                            f"promocion_meli_aplicables_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                            "📊 Descargar Excel",
+                            excel_buffer.getvalue(),
+                            f"promociones_meli_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                    except Exception as e:
+                        st.warning(f"⚠️ No se pudo generar Excel: {e}")
+                        # Fallback a CSV
+                        csv_buffer = io.StringIO()
+                        pd.DataFrame(resultados_promo).to_csv(csv_buffer, index=False)
+                        st.download_button(
+                            "📄 Descargar CSV",
+                            csv_buffer.getvalue(),
+                            f"promociones_meli_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
                             "text/csv"
                         )
                     
-                    # Cards de productos con mejor margen
-                    st.markdown("### 🏆 Productos con Mejor Margen")
-                    
-                    top_products = sorted([r for r in resultados_promo if r["aplicar"]], 
-                                         key=lambda x: x["margen_sobre_neto"], reverse=True)[:6]
-                    
-                    if top_products:
-                        top_cols = st.columns(3)
-                        for i, r in enumerate(top_products):
-                            with top_cols[i % 3]:
-                                st.markdown(f"""
-                                <div class="scenario-card best">
-                                    <b>{r['title'][:35]}</b><br>
-                                    <span style="color: #666; font-size: 0.85rem;">SKU: {r['sku'] or 'N/A'}</span><br><br>
-                                    <b>Precio actual:</b> ${r['current_price']:,.2f}<br>
-                                    <b>Precio promo:</b> ${r['precio_promo']:,.2f}<br>
-                                    <b>Descuento:</b> {r['descuento_pct']:.1f}%<br>
-                                    <b>Pago neto:</b> ${r['pago_neto']:,.2f}<br>
-                                    <b>Ganancia:</b> ${r['ganancia']:,.2f}<br>
-                                    <b>Margen:</b> {r['margen_sobre_neto']:.1f}%
-                                </div>
-                                """, unsafe_allow_html=True)
-                    
-                    # Sección de aplicación masiva (solo visual, no ejecuta realmente por seguridad)
+                    # ============================================================
+                    # APLICACIÓN MASIVA
+                    # ============================================================
                     st.markdown("---")
-                    st.markdown("### ⚡ Aplicación Masiva de Descuentos")
+                    st.markdown("### ⚡ Aplicar Descuentos Masivamente")
                     
-                    st.warning("""
-                    ⚠️ **Advertencia:** La aplicación de descuentos modificará los precios reales en Mercado Libre.
+                    aplicables = [r for r in resultados_promo if r["aplicar"]]
                     
-                    Revisa cuidadosamente los cálculos antes de aplicar. Se recomienda:
-                    1. Descargar la planilla y verificar
-                    2. Aplicar primero a 1-2 productos de prueba
-                    3. Monitorear las métricas después de aplicar
-                    """)
+                    if aplicables:
+                        st.info(f"Hay {len(aplicables)} productos listos para aplicar descuento.")
+                        
+                        aplicar_masivo = st.button(
+                            f"🚀 Aplicar descuentos a {len(aplicables)} productos",
+                            type="primary"
+                        )
+                        
+                        if aplicar_masivo and meli_token:
+                            with st.spinner("Aplicando descuentos..."):
+                                aplicados = 0
+                                errores = []
+                                
+                                for r in aplicables:
+                                    success, result = update_meli_item_price(
+                                        meli_token,
+                                        r["meli_id"],
+                                        r["precio_promo"],
+                                        r["current_price"]  # original_price para mostrar tachado
+                                    )
+                                    if success:
+                                        aplicados += 1
+                                    else:
+                                        errores.append(f"{r['meli_id']}: {result}")
+                                    time.sleep(0.2)
+                                
+                                if aplicados > 0:
+                                    st.success(f"✅ {aplicados} descuentos aplicados correctamente")
+                                if errores:
+                                    with st.expander(f"❌ Errores ({len(errores)})"):
+                                        for err in errores[:10]:
+                                            st.markdown(f"• {err}")
+                        elif aplicar_masivo:
+                            st.error("❌ No hay token de MELI configurado")
+                    else:
+                        st.warning("⚠️ No hay productos aplicables. Verifica que tengan costo y margen positivo.")
                     
-                    aplicar_masivo = st.button(
-                        f"🚀 Aplicar descuentos a {len(aplicables)} productos",
-                        type="primary",
-                        disabled=len(aplicables) == 0
-                    )
+                    # ============================================================
+                    # APLICACIÓN MANUAL POR MLM ID
+                    # ============================================================
+                    st.markdown("---")
+                    st.markdown("### 🔧 Aplicar Descuento Manual (por ID de publicación)")
                     
-                    if aplicar_masivo and meli_token and user_id:
-                        with st.spinner("Aplicando promociones..."):
-                            aplicados = 0
-                            errores = []
+                    manual_col1, manual_col2, manual_col3 = st.columns([2, 1, 1])
+                    
+                    with manual_col1:
+                        manual_mlm_id = st.text_input(
+                            "ID de publicación MELI",
+                            placeholder="MLM1234567890",
+                            key="manual_mlm_id"
+                        )
+                    
+                    with manual_col2:
+                        manual_precio = st.number_input(
+                            "Nuevo precio",
+                            min_value=0.0,
+                            value=0.0,
+                            step=10.0,
+                            key="manual_precio"
+                        )
+                    
+                    with manual_col3:
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        aplicar_manual = st.button("Aplicar", type="primary", key="btn_aplicar_manual")
+                    
+                    if aplicar_manual and meli_token and manual_mlm_id and manual_precio > 0:
+                        with st.spinner(f"Aplicando descuento a {manual_mlm_id}..."):
+                            # Buscar precio original
+                            original_price = None
+                            for r in resultados_promo:
+                                if r["meli_id"] == manual_mlm_id:
+                                    original_price = r["current_price"]
+                                    break
                             
-                            for r in aplicables:
-                                # Aplicar promoción oficial de MELI (PRICE_DISCOUNT)
-                                success, result = apply_meli_promotion(
-                                    meli_token,
-                                    r["meli_id"],
-                                    user_id,
-                                    r["precio_promo"],
-                                    r["current_price"]
-                                )
-                                if success:
-                                    aplicados += 1
-                                else:
-                                    errores.append(f"{r['meli_id']}: {result}")
-                                time.sleep(0.2)  # Rate limiting
+                            success, result = update_meli_item_price(
+                                meli_token,
+                                manual_mlm_id,
+                                manual_precio,
+                                original_price
+                            )
                             
-                            if aplicados > 0:
-                                st.success(f"✅ {aplicados} promociones aplicadas correctamente")
-                            if errores:
-                                with st.expander(f"❌ Errores ({len(errores)})"):
-                                    for err in errores[:10]:
-                                        st.markdown(f"• {err}")
-                                    if len(errores) > 10:
-                                        st.markdown(f"... y {len(errores) - 10} más")
-                    elif aplicar_masivo:
-                        st.error("❌ No hay token de MELI o user_id configurado")
-                else:
-                    st.error("❌ No se pudieron calcular descuentos. Verifica que los productos tengan costos asignados.")
-    else:
-        st.info("💡 Conecta tu cuenta de Mercado Libre y asegúrate de tener productos con costos para calcular los descuentos.")
+                            if success:
+                                st.success(f"✅ Descuento aplicado a {manual_mlm_id}: ${manual_precio:,.2f}")
+                            else:
+                                st.error(f"❌ Error: {result}")
+                    elif aplicar_manual:
+                        st.error("❌ Completa el ID de publicación y el precio")
 
-# ============================================================
+    # ============================================================
 # FOOTER
 # ============================================================
 st.markdown("---")
