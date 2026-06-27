@@ -1536,6 +1536,47 @@ def get_promotion_discount_percentage(original_price, promo_price):
     return round(((original_price - promo_price) / original_price) * 100, 1)
 
 
+def enroll_item_to_promotion(access_token, item_id, promo_id, promo_type, deal_price, user_id):
+    """
+    Inscribe un item en una promoción oficial de MELI.
+    
+    Endpoints según tipo:
+    - DEAL: POST /seller-promotions/items/{item_id}?promotion_type=DEAL&promotion_id={promo_id}&app_version=v2
+    - SMART: POST /seller-promotions/items/{item_id}?promotion_type=SMART&promotion_id={promo_id}&app_version=v2
+    - PRICE_DISCOUNT: POST /seller-promotions/items/{item_id}?promotion_type=PRICE_DISCOUNT&app_version=v2
+    - SELLER_CAMPAIGN: POST /seller-promotions/items/{item_id}?promotion_type=SELLER_CAMPAIGN&promotion_id={promo_id}&app_version=v2
+    """
+    try:
+        url = f"{MELI_API_BASE}/seller-promotions/items/{item_id}"
+        
+        params = {"app_version": "v2"}
+        if promo_type in ["DEAL", "SMART", "SELLER_CAMPAIGN"]:
+            params["promotion_type"] = promo_type
+            params["promotion_id"] = promo_id
+        elif promo_type == "PRICE_DISCOUNT":
+            params["promotion_type"] = "PRICE_DISCOUNT"
+        else:
+            params["promotion_type"] = promo_type
+            if promo_id:
+                params["promotion_id"] = promo_id
+        
+        headers = get_meli_headers(access_token)
+        
+        body = {
+            "deal_price": round(deal_price, 2),
+            "top_deal_price": round(deal_price * 0.95, 2),
+        }
+        
+        r = requests.post(url, headers=headers, params=params, json=body, timeout=15)
+        if r.status_code in [200, 201]:
+            return True, r.json()
+        else:
+            error_msg = parse_meli_promotion_api_error(r.text)
+            return False, f"HTTP {r.status_code}: {error_msg}"
+    except Exception as e:
+        return False, str(e)
+
+
 def parse_meli_promotion_api_error(response_text):
     """Parsea errores detallados de la API de promociones de MELI"""
     try:
@@ -2992,8 +3033,9 @@ with tab4:
                                                     
                                                     success, result = enroll_item_to_promotion(
                                                         meli_token,
-                                                        promo_id,
                                                         p["meli_id"],
+                                                        promo_id,
+                                                        promo_type,
                                                         deal_price,
                                                         meli_user_id
                                                     )
