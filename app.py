@@ -2843,194 +2843,199 @@ with tab4:
                         except Exception as e:
                             st.warning(f"⚠️ No se pudo generar Excel: {e}")
                     
-                    # ============================================================
-                    # PROMOCIONES OFICIALES MELI
-                    # ============================================================
-                    st.markdown("---")
-                    st.markdown("### 🏷️ Promociones Oficiales de Mercado Libre")
-                    st.caption("Inscribe tus productos en promociones oficiales de MELI (OFERTA DEL DÍA, etc.)")
+                    # Guardar en session_state para persistir entre interacciones
+                    st.session_state.resultados_promo = resultados_promo
+                    st.session_state.productos_sin_costo = productos_sin_costo
                     
-                    # Obtener promociones activas
-                    if meli_token and meli_user:
-                        with st.spinner("Cargando promociones disponibles..."):
-                            meli_user_id = meli_user.get("id", "")
+                    # ============================================================
+                    # PROMOCIONES OFICIALES MELI (guardar en session_state)
+                    # ============================================================
+                    st.session_state.resultados_promo = resultados_promo
+                    st.session_state.productos_sin_costo = productos_sin_costo
+                    st.session_state.calculation_done = True
+
+
+        # ============================================================
+        # PROMOCIONES OFICIALES MELI (siempre visible después de calcular)
+        # ============================================================
+        if st.session_state.get("calculation_done") and meli_token and meli_user:
+            st.markdown("---")
+            st.markdown("### 🏷️ Promociones Oficiales de Mercado Libre")
+            st.caption("Inscribe tus productos en promociones oficiales de MELI (OFERTA DEL DÍA, etc.)")
+            
+            resultados_promo = st.session_state.get("resultados_promo", [])
+            
+            with st.spinner("Cargando promociones disponibles..."):
+                meli_user_id = meli_user.get("id", "")
+                
+                try:
+                    promociones_por_item = fetch_all_items_promotions(meli_token, meli_items, meli_user_id)
+                except NameError as e:
+                    st.error(f"❌ Error de carga (caché): {e}")
+                    st.info("🔄 Intentá recargar la app con Ctrl+Shift+R o reiniciá desde 'Manage app'")
+                    promociones_por_item = {}
+                
+                if isinstance(promociones_por_item, dict) and "error" in promociones_por_item:
+                    st.error(f"❌ Error al cargar promociones: {promociones_por_item['error']}")
+                else:
+                    unique_promos = aggregate_unique_promotions(promociones_por_item)
+                    
+                    if not unique_promos:
+                        st.info("📭 No hay promociones oficiales disponibles para tus productos en este momento.")
+                    else:
+                        enrollable_promos = {k: v for k, v in unique_promos.items() if v.get("status") in ["candidate", "pending", ""]}
+                        active_promos = {k: v for k, v in unique_promos.items() if v.get("status") == "started"}
+                        
+                        if active_promos:
+                            st.success(f"🎉 {len(active_promos)} promoción(es) ya activa(s) en tus productos")
+                            with st.expander("Ver promociones activas"):
+                                for promo_id, promo in active_promos.items():
+                                    st.markdown(f"**{promo['name']}** ({promo['type']}) — {len(promo['items'])} productos")
+                        
+                        if not enrollable_promos:
+                            st.info("📭 No hay promociones disponibles para inscribir en este momento. Las promociones activas ya están corriendo.")
+                        else:
+                            st.success(f"🎉 {len(enrollable_promos)} promoción(es) disponible(s) para inscribir")
                             
-                            # Defensa contra caché de Streamlit Cloud
-                            try:
-                                promociones_por_item = fetch_all_items_promotions(meli_token, meli_items, meli_user_id)
-                            except NameError as e:
-                                st.error(f"❌ Error de carga (caché): {e}")
-                                st.info("🔄 Intentá recargar la app con Ctrl+Shift+R o reiniciá desde 'Manage app'")
-                                promociones_por_item = {}
+                            promo_options = {}
+                            for promo_id, promo in enrollable_promos.items():
+                                label = f"{promo['name']} ({promo['type']}) — {len(promo['items'])} productos"
+                                promo_options[label] = promo
                             
-                            if isinstance(promociones_por_item, dict) and "error" in promociones_por_item:
-                                st.error(f"❌ Error al cargar promociones: {promociones_por_item['error']}")
-                            else:
-                                unique_promos = aggregate_unique_promotions(promociones_por_item)
+                            promo_seleccionada = st.selectbox(
+                                "Selecciona una promoción:",
+                                options=list(promo_options.keys()),
+                                key="promo_selector"
+                            )
+                            
+                            if promo_seleccionada:
+                                promo = promo_options[promo_seleccionada]
+                                promo_id = promo["id"]
+                                promo_type = promo["type"]
                                 
-                                if not unique_promos:
-                                    st.info("📭 No hay promociones oficiales disponibles para tus productos en este momento.")
-                                else:
-                                    # Solo mostrar promociones que NO estén ya iniciadas (candidate, pending, etc.)
-                                    enrollable_promos = {k: v for k, v in unique_promos.items() if v.get("status") in ["candidate", "pending", ""]}
-                                    active_promos = {k: v for k, v in unique_promos.items() if v.get("status") == "started"}
+                                st.markdown(f"**Tipo:** {promo_type} | **Estado:** {promo['status']}")
+                                if promo['start_date'] and promo['finish_date']:
+                                    st.caption(f"📅 {promo['start_date'][:10]} → {promo['finish_date'][:10]}")
+                                
+                                st.markdown("#### ✅ Productos disponibles para inscribir")
+                                
+                                productos_califican = []
+                                for detail in promo["item_details"]:
+                                    item_id = detail["item_id"]
+                                    r = None
+                                    for res in resultados_promo:
+                                        if res["meli_id"] == item_id:
+                                            r = res
+                                            break
                                     
-                                    if active_promos:
-                                        st.success(f"🎉 {len(active_promos)} promoción(es) ya activa(s) en tus productos")
-                                        with st.expander("Ver promociones activas"):
-                                            for promo_id, promo in active_promos.items():
-                                                st.markdown(f"**{promo['name']}** ({promo['type']}) — {len(promo['items'])} productos")
+                                    if not r:
+                                        continue
                                     
-                                    if not enrollable_promos:
-                                        st.info("📭 No hay promociones disponibles para inscribir en este momento. Las promociones activas ya están corriendo.")
-                                    else:
-                                        st.success(f"🎉 {len(enrollable_promos)} promoción(es) disponible(s) para inscribir")
+                                    original_price = detail.get("original_price", r["current_price"])
+                                    min_price = detail.get("min_discounted_price", 0)
+                                    max_price = detail.get("max_discounted_price", original_price)
+                                    suggested_price = detail.get("suggested_discounted_price", 0)
+                                    
+                                    our_price = r["precio_promo"]
+                                    discount_pct = get_promotion_discount_percentage(original_price, our_price)
+                                    
+                                    qualifies = min_price <= our_price <= max_price if min_price > 0 and max_price > 0 else True
+                                    
+                                    productos_califican.append({
+                                        "meli_id": item_id,
+                                        "title": r["title"],
+                                        "current_price": r["current_price"],
+                                        "precio_promo": our_price,
+                                        "discount_pct": discount_pct,
+                                        "min_price": min_price,
+                                        "max_price": max_price,
+                                        "suggested_price": suggested_price,
+                                        "qualifies": qualifies,
+                                        "margen_sobre_neto": r["margen_sobre_neto"],
+                                    })
+                                
+                                if productos_califican:
+                                    ok_items = [p for p in productos_califican if p["qualifies"]]
+                                    nok_items = [p for p in productos_califican if not p["qualifies"]]
+                                    
+                                    if ok_items:
+                                        st.info(f"{len(ok_items)} productos pueden inscribirse")
                                         
-                                        promo_options = {}
-                                        for promo_id, promo in enrollable_promos.items():
-                                            label = f"{promo['name']} ({promo['type']}) — {len(promo['items'])} productos"
-                                            promo_options[label] = promo
+                                        df_calif = pd.DataFrame([
+                                            {
+                                                "ID MELI": p["meli_id"],
+                                                "Producto": p["title"][:35] + "..." if len(p["title"]) > 35 else p["title"],
+                                                "Precio Actual": f"${p['current_price']:,.2f}",
+                                                "Precio Promo": f"${p['precio_promo']:,.2f}",
+                                                "Desc.%": f"{p['discount_pct']:.1f}%",
+                                                "Margen": f"{p['margen_sobre_neto']:.1f}%",
+                                            }
+                                            for p in ok_items
+                                        ])
+                                        st.dataframe(df_calif, use_container_width=True, hide_index=True, height=min(len(ok_items)*45, 350))
                                         
-                                        promo_seleccionada = st.selectbox(
-                                            "Selecciona una promoción:",
-                                            options=list(promo_options.keys()),
-                                            key="promo_selector"
+                                        inscribir_promo = st.button(
+                                            f"🏷️ Inscribir {len(ok_items)} productos en '{promo['name']}'",
+                                            type="primary",
+                                            key="btn_inscribir_promo"
                                         )
                                         
-                                        if promo_seleccionada:
-                                            promo = promo_options[promo_seleccionada]
-                                            promo_id = promo["id"]
-                                            promo_type = promo["type"]
-                                            
-                                            st.markdown(f"**Tipo:** {promo_type} | **Estado:** {promo['status']}")
-                                            if promo['start_date'] and promo['finish_date']:
-                                                st.caption(f"📅 {promo['start_date'][:10]} → {promo['finish_date'][:10]}")
-                                            
-                                            st.markdown("#### ✅ Productos disponibles para inscribir")
-                                            
-                                            # Construir tabla de productos con descuento sugerido
-                                            productos_califican = []
-                                            for detail in promo["item_details"]:
-                                                item_id = detail["item_id"]
-                                                # Buscar el producto en resultados_promo
-                                                r = None
-                                                for res in resultados_promo:
-                                                    if res["meli_id"] == item_id:
-                                                        r = res
-                                                        break
+                                        if inscribir_promo:
+                                            with st.spinner("Inscribiendo productos..."):
+                                                inscritos = 0
+                                                errores_promo = []
                                                 
-                                                if not r:
-                                                    continue
-                                                
-                                                original_price = detail.get("original_price", r["current_price"])
-                                                min_price = detail.get("min_discounted_price", 0)
-                                                max_price = detail.get("max_discounted_price", original_price)
-                                                suggested_price = detail.get("suggested_discounted_price", 0)
-                                                
-                                                # Calcular descuento basado en nuestro precio promo
-                                                our_price = r["precio_promo"]
-                                                discount_pct = get_promotion_discount_percentage(original_price, our_price)
-                                                
-                                                # Verificar si nuestro precio está dentro del rango permitido
-                                                qualifies = min_price <= our_price <= max_price if min_price > 0 and max_price > 0 else True
-                                                
-                                                productos_califican.append({
-                                                    "meli_id": item_id,
-                                                    "title": r["title"],
-                                                    "current_price": r["current_price"],
-                                                    "precio_promo": our_price,
-                                                    "discount_pct": discount_pct,
-                                                    "min_price": min_price,
-                                                    "max_price": max_price,
-                                                    "suggested_price": suggested_price,
-                                                    "qualifies": qualifies,
-                                                    "margen_sobre_neto": r["margen_sobre_neto"],
-                                                })
-                                            
-                                            if productos_califican:
-                                                # Separar los que califican vs los que no
-                                                ok_items = [p for p in productos_califican if p["qualifies"]]
-                                                nok_items = [p for p in productos_califican if not p["qualifies"]]
-                                                
-                                                if ok_items:
-                                                    st.info(f"{len(ok_items)} productos pueden inscribirse")
+                                                def _enroll_single(p):
+                                                    deal_price = p["precio_promo"]
+                                                    if p["suggested_price"] > 0 and p["suggested_price"] < deal_price:
+                                                        deal_price = p["suggested_price"]
                                                     
-                                                    df_calif = pd.DataFrame([
-                                                        {
-                                                            "ID MELI": p["meli_id"],
-                                                            "Producto": p["title"][:35] + "..." if len(p["title"]) > 35 else p["title"],
-                                                            "Precio Actual": f"${p['current_price']:,.2f}",
-                                                            "Precio Promo": f"${p['precio_promo']:,.2f}",
-                                                            "Desc.%": f"{p['discount_pct']:.1f}%",
-                                                            "Margen": f"{p['margen_sobre_neto']:.1f}%",
-                                                        }
-                                                        for p in ok_items
-                                                    ])
-                                                    st.dataframe(df_calif, use_container_width=True, hide_index=True, height=min(len(ok_items)*45, 350))
-                                                    
-                                                    # Inscripción
-                                                    inscribir_promo = st.button(
-                                                        f"🏷️ Inscribir {len(ok_items)} productos en '{promo['name']}'",
-                                                        type="primary",
-                                                        key="btn_inscribir_promo"
+                                                    success, result = enroll_item_to_promotion(
+                                                        meli_token,
+                                                        promo_id,
+                                                        p["meli_id"],
+                                                        deal_price,
+                                                        meli_user_id
                                                     )
-                                                    
-                                                    if inscribir_promo:
-                                                        with st.spinner("Inscribiendo productos..."):
-                                                            inscritos = 0
-                                                            errores_promo = []
-                                                            
-                                                            def _enroll_single(p):
-                                                                # Elegir el mejor precio: nuestro calculado vs sugerido
-                                                                deal_price = p["precio_promo"]
-                                                                if p["suggested_price"] > 0 and p["suggested_price"] < deal_price:
-                                                                    deal_price = p["suggested_price"]
-                                                                
-                                                                success, result = enroll_item_to_promotion(
-                                                                    meli_token,
-                                                                    promo_id,
-                                                                    p["meli_id"],
-                                                                    deal_price,
-                                                                    meli_user_id
-                                                                )
-                                                                return success, p["meli_id"], result
-                                                            
-                                                            with ThreadPoolExecutor(max_workers=10) as executor:
-                                                                futures = {executor.submit(_enroll_single, p): p for p in ok_items}
-                                                                for future in as_completed(futures):
-                                                                    success, meli_id, result = future.result()
-                                                                    if success:
-                                                                        inscritos += 1
-                                                                    else:
-                                                                        errores_promo.append(f"{meli_id}: {result}")
-                                                            
-                                                            if inscritos > 0:
-                                                                st.success(f"✅ {inscritos}/{len(ok_items)} productos inscritos")
-                                                            if errores_promo:
-                                                                with st.expander(f"❌ Errores ({len(errores_promo)}):"):
-                                                                    for err in errores_promo[:10]:
-                                                                        st.markdown(f"• {err}")
-                                                else:
-                                                    st.warning("⚠️ Ningún producto califica con el precio calculado. Verificá los rangos de precios.")
+                                                    return success, p["meli_id"], result
                                                 
-                                                if nok_items:
-                                                    with st.expander(f"⚠️ {len(nok_items)} productos fuera de rango"):
-                                                        st.caption("El precio calculado está fuera del rango permitido por MELI para esta promoción")
-                                                        df_nok = pd.DataFrame([
-                                                            {
-                                                                "ID MELI": p["meli_id"],
-                                                                "Producto": p["title"][:30] + "...",
-                                                                "Nuestro Precio": f"${p['precio_promo']:,.2f}",
-                                                                "Mínimo": f"${p['min_price']:,.2f}",
-                                                                "Máximo": f"${p['max_price']:,.2f}",
-                                                            }
-                                                            for p in nok_items[:10]
-                                                        ])
-                                                        st.dataframe(df_nok, use_container_width=True, hide_index=True)
-                                            else:
-                                                st.warning("⚠️ No se encontraron productos para esta promoción.")
-
-                                            st.info("🔑 Conectá tu cuenta de Mercado Libre para ver promociones disponibles")
+                                                with ThreadPoolExecutor(max_workers=10) as executor:
+                                                    futures = {executor.submit(_enroll_single, p): p for p in ok_items}
+                                                    for future in as_completed(futures):
+                                                        success, meli_id, result = future.result()
+                                                        if success:
+                                                            inscritos += 1
+                                                        else:
+                                                            errores_promo.append(f"{meli_id}: {result}")
+                                                
+                                                if inscritos > 0:
+                                                    st.success(f"✅ {inscritos}/{len(ok_items)} productos inscritos")
+                                                if errores_promo:
+                                                    with st.expander(f"❌ Errores ({len(errores_promo)}):"):
+                                                        for err in errores_promo[:10]:
+                                                            st.markdown(f"• {err}")
+                                    else:
+                                        st.warning("⚠️ Ningún producto califica con el precio calculado. Verificá los rangos de precios.")
+                                    
+                                    if nok_items:
+                                        with st.expander(f"⚠️ {len(nok_items)} productos fuera de rango"):
+                                            st.caption("El precio calculado está fuera del rango permitido por MELI para esta promoción")
+                                            df_nok = pd.DataFrame([
+                                                {
+                                                    "ID MELI": p["meli_id"],
+                                                    "Producto": p["title"][:30] + "...",
+                                                    "Nuestro Precio": f"${p['precio_promo']:,.2f}",
+                                                    "Mínimo": f"${p['min_price']:,.2f}",
+                                                    "Máximo": f"${p['max_price']:,.2f}",
+                                                }
+                                                for p in nok_items[:10]
+                                            ])
+                                            st.dataframe(df_nok, use_container_width=True, hide_index=True)
+                                else:
+                                    st.warning("⚠️ No se encontraron productos para esta promoción.")
+        
+        elif meli_token and meli_user and not st.session_state.get("calculation_done"):
+            st.info("🔑 Calculá los descuentos primero para ver las promociones disponibles")
                     
 # FOOTER
 # ============================================================
